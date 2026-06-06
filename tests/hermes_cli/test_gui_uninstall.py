@@ -290,3 +290,59 @@ def test_run_uninstall_yes_full_wipes_home(tmp_path, monkeypatch):
 
     assert not hermes_home.exists()
 
+
+def test_uninstall_module_main_gui_mode(tmp_path, monkeypatch):
+    """`python -m hermes_cli.uninstall --mode gui` runs the GUI-only path.
+
+    This is the lightweight, venv-independent entrypoint the desktop launches
+    with a system Python (so lite/full don't rmtree their own running venv on
+    Windows). Verify it dispatches by mode without prompting.
+    """
+    import hermes_cli.uninstall as uninstall
+
+    hermes_home = tmp_path / ".hermes"
+    agent_root = hermes_home / "hermes-agent"
+    (agent_root / "hermes_cli").mkdir(parents=True)
+    desktop = agent_root / "apps" / "desktop"
+    (desktop / "release").mkdir(parents=True)
+    (hermes_home / "desktop-build-stamp.json").write_text("{}")
+    (hermes_home / "config.yaml").write_text("x: 1\n")
+
+    monkeypatch.setattr(uninstall, "get_hermes_home", lambda: hermes_home)
+    from hermes_cli import gui_uninstall as gu_mod
+    monkeypatch.setattr(gu_mod, "packaged_gui_app_paths", lambda: [])
+    monkeypatch.setattr(gu_mod, "desktop_userdata_dir", lambda: tmp_path / "none")
+    monkeypatch.setattr(gu_mod, "get_hermes_home", lambda: hermes_home)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: pytest.fail("prompted in module main"))
+
+    rc = uninstall.main(["--mode", "gui"])
+    assert rc == 0
+    # GUI swept, agent + config kept (gui-only contract).
+    assert not (desktop / "release").exists()
+    assert not (hermes_home / "desktop-build-stamp.json").exists()
+    assert (agent_root / "hermes_cli").exists()
+    assert (hermes_home / "config.yaml").exists()
+
+
+def test_uninstall_module_main_rejects_bad_mode():
+    """An invalid --mode exits non-zero (argparse), never silently full-wipes."""
+    import hermes_cli.uninstall as uninstall
+
+    with pytest.raises(SystemExit) as exc:
+        uninstall.main(["--mode", "nuke"])
+    assert exc.value.code != 0
+
+
+def test_uninstall_args_namespace_mode_mapping():
+    """_UninstallArgs maps mode → the gui/full flags run_uninstall reads."""
+    import hermes_cli.uninstall as uninstall
+
+    gui = uninstall._UninstallArgs(mode="gui")
+    assert gui.gui is True and gui.full is False and gui.yes is True
+
+    lite = uninstall._UninstallArgs(mode="lite")
+    assert lite.gui is False and lite.full is False and lite.yes is True
+
+    full = uninstall._UninstallArgs(mode="full")
+    assert full.gui is False and full.full is True and full.yes is True
+

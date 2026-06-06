@@ -881,3 +881,50 @@ def _perform_uninstall(
     print()
     print("Thank you for using Hermes Agent! ⚕")
     print()
+
+
+class _UninstallArgs:
+    """Lightweight args namespace for the module entrypoint below."""
+
+    def __init__(self, *, mode: str):
+        self.gui = mode == "gui"
+        self.gui_summary = False
+        self.full = mode == "full"
+        self.yes = True  # the module entrypoint is always non-interactive
+
+
+def main(argv=None) -> int:
+    """Module entrypoint: ``python -m hermes_cli.uninstall --mode <gui|lite|full>``.
+
+    Exists so the desktop app can run the uninstall under a Python interpreter
+    OUTSIDE the venv being deleted. On Windows, ``lite``/``full`` rmtree the
+    venv that contains the running ``python.exe`` — and a running .exe is
+    mandatory-locked, so doing that from the venv's own interpreter half-fails.
+    The desktop launches this with the system Python + ``PYTHONPATH=<agentRoot>``
+    so ``import hermes_cli`` resolves from source while the venv is torn down.
+
+    This module imports only stdlib + ``hermes_constants`` + ``hermes_cli.colors``
+    (and lazily ``hermes_cli.gui_uninstall``), so it runs fine under a bare
+    system Python with no site-packages from the venv.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="python -m hermes_cli.uninstall")
+    parser.add_argument(
+        "--mode",
+        choices=["gui", "lite", "full"],
+        required=True,
+        help="gui = Chat GUI only; lite = GUI + agent, keep data; full = everything",
+    )
+    ns = parser.parse_args(argv)
+    args = _UninstallArgs(mode=ns.mode)
+
+    if args.gui:
+        run_gui_uninstall(args)
+    else:
+        run_uninstall(args)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

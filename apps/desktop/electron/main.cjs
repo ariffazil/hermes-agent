@@ -5507,12 +5507,36 @@ async function runDesktopUninstall(mode) {
     return { ok: false, error: 'invalid-mode', message: error.message }
   }
 
-  const py = uninstallVenvPython()
-  if (!fileExists(py)) {
+  const venvPy = uninstallVenvPython()
+  if (!fileExists(venvPy)) {
     return {
       ok: false,
       error: 'agent-missing',
       message: `Can't run the uninstaller: no Hermes agent venv at ${VENV_ROOT}.`
+    }
+  }
+
+  // Interpreter choice (Finding 3): lite/full rmtree the venv that holds the
+  // running python.exe. On Windows a running .exe is mandatory-locked, so the
+  // rmtree must NOT be driven by the venv's own interpreter — use a system
+  // Python with PYTHONPATH=<agentRoot> so `import hermes_cli` resolves from
+  // source while the venv is torn down. gui-only doesn't touch the venv, so the
+  // venv python is fine there. If no system Python exists (the Windows edge
+  // case), fall back to the venv python — gui-only is unaffected; lite/full may
+  // leave venv remnants the user can delete, which we log.
+  let py = venvPy
+  let pythonPath = null
+  if (modeRemovesAgent(mode)) {
+    const sysPy = findSystemPython()
+    if (sysPy) {
+      py = sysPy
+      pythonPath = ACTIVE_HERMES_ROOT
+    } else if (IS_WINDOWS) {
+      rememberLog(
+        '[uninstall] no system Python found for lite/full on Windows; falling back ' +
+          'to the venv python — venv files locked by the running interpreter may ' +
+          'remain and need manual deletion.'
+      )
     }
   }
 
@@ -5534,6 +5558,7 @@ async function runDesktopUninstall(mode) {
   const scriptArgs = {
     desktopPid: process.pid,
     pythonExe: py,
+    pythonPath,
     agentRoot: ACTIVE_HERMES_ROOT,
     uninstallArgs,
     appPath: removeBundle,

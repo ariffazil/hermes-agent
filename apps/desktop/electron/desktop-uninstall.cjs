@@ -31,21 +31,17 @@ const path = require('node:path')
 const UNINSTALL_MODES = ['gui', 'lite', 'full']
 
 /**
- * Map an uninstall mode to the `hermes_cli.main uninstall` argv (after the
- * `-m hermes_cli.main` prefix). Always non-interactive (`--yes`).
+ * Map an uninstall mode to the `python -m hermes_cli.uninstall` argv (after the
+ * python executable). Uses the dedicated lightweight module entrypoint (not
+ * `hermes_cli.main`) so it can run under a system Python OUTSIDE the venv that
+ * lite/full delete — see the Finding-3 note in buildWindowsCleanupScript.
  * Throws on an unknown mode so a typo can't silently become a full wipe.
  */
 function uninstallArgsForMode(mode) {
-  switch (mode) {
-    case 'gui':
-      return ['uninstall', '--gui', '--yes']
-    case 'lite':
-      return ['uninstall', '--yes']
-    case 'full':
-      return ['uninstall', '--full', '--yes']
-    default:
-      throw new Error(`Unknown uninstall mode: ${mode}`)
+  if (!UNINSTALL_MODES.includes(mode)) {
+    throw new Error(`Unknown uninstall mode: ${mode}`)
   }
+  return ['-m', 'hermes_cli.uninstall', '--mode', mode]
 }
 
 /** True when `mode` removes the agent (lite/full), false for gui-only. */
@@ -114,18 +110,22 @@ function shouldRemoveAppBundle(isPackaged, appPath) {
 
 /**
  * Build a POSIX cleanup shell script (macOS / Linux). It:
- *   1. waits for the desktop PID to exit (so the venv shim + bundle unlock),
- *   2. runs the Python uninstall with the mode's flags,
+ *   1. waits (bounded ~30s) for the desktop PID to exit (venv/bundle unlock),
+ *   2. runs the Python uninstall module with the mode,
  *   3. removes the app bundle if one was resolved.
- * `quote` defends against spaces in paths.
+ *
+ * `pythonExe` should be a Python OUTSIDE the venv for lite/full (the venv is
+ * being deleted); `pythonPath` is prepended to PYTHONPATH so `import hermes_cli`
+ * resolves from the agent source. `q()` single-quote-escapes for the shell
+ * (closes-escapes-reopens any embedded apostrophe), defending against spaces.
  */
-function buildPosixCleanupScript({ desktopPid, pythonExe, agentRoot, uninstallArgs, appPath, hermesHome }) {
+function buildPosixCleanupScript({ desktopPid, pythonExe, pythonPath, agentRoot, uninstallArgs, appPath, hermesHome }) {
   const q = s => `'${String(s).replace(/'/g, `'\\''`)}'`
   const lines = [
     '#!/bin/bash',
     'set -u',
     '# Wait (up to ~30s) for the desktop process to exit so the venv python',
-    '# shim and the app bundle are no longer locked/in-use.',
+    '# and the app bundle are no longer in use.',
     `pid=${Number(desktopPid) || 0}`,
     'if [ "$pid" -gt 0 ]; then',
     '  for _ in $(seq 1 60); do',
@@ -133,10 +133,15 @@ function buildPosixCleanupScript({ desktopPid, pythonExe, agentRoot, uninstallAr
     '    sleep 0.5',
     '  done',
     'fi',
-    `export HERMES_HOME=${q(hermesHome)}`,
-    `cd ${q(agentRoot)} 2>/dev/null || true`,
-    `${q(pythonExe)} -m hermes_cli.main ${uninstallArgs.map(q).join(' ')} || true`
+    `export HERMES_HOME=${q(hermesHome)}`
   ]
+  if (pythonPath) {
+    lines.push(`export PYTHONPATH=${q(pythonPath)}\${PYTHONPATH:+:$PYTHONPATH}`)
+  }
+  lines.push(
+    `cd ${q(agentRoot)} 2>/dev/null || true`,
+    `${q(pythonExe)} ${uninstallArgs.map(q).join(' ')} || true`
+  )
   if (appPath) {
     lines.push(`rm -rf ${q(appPath)} || true`)
   }
@@ -148,41 +153,55 @@ function buildPosixCleanupScript({ desktopPid, pythonExe, agentRoot, uninstallAr
 
 /**
  * Build a Windows cleanup batch script. Same three steps, cmd.exe flavored.
- * Uses tasklist to wait for the desktop PID to exit, then runs the uninstall
- * and removes the install dir.
  *
- * Windows-specific hardening: even after the desktop PID is gone, a freshly
- * SIGTERM'd backend grandchild can briefly keep a handle open, and the OS
- * releases directory handles lazily — so a single `rmdir /s /q` can half-fail
- * with the tree still partly present. The Electron side already tree-kills all
- * backends + waits for the venv shim to unlock before launching this script
- * (releaseBackendLock), but we belt-and-suspenders it here: tree-kill anything
- * still rooted under the install dir, then retry the rmdir a few times with a
- * short pause so a lazily-released handle can't leave a half-removed bundle.
+ * Finding 3 (venv self-deletion): for lite/full the agent uninstall rmtree's
+ * the venv that contains `python.exe`. A running .exe is mandatory-locked on
+ * Windows, so running the uninstall from the venv's OWN python half-fails. The
+ * desktop passes a system Python (findSystemPython) as `pythonExe` for those
+ * modes + `pythonPath`=agentRoot so `import hermes_cli` resolves from source
+ * while the venv is torn down. gui-only doesn't touch the venv, so it can use
+ * either interpreter.
+ *
+ * Wait-loop: bounded (matches POSIX's ~30s cap) so a never-exiting / mismatched
+ * PID can't wedge the cleanup forever. The `/FI "PID eq"` filter is an EXACT
+ * match, so no redundant `| find` (which would substring-match 99→990).
+ *
+ * Removal: even after the desktop PID is gone, Windows releases directory
+ * handles lazily, so a single `rmdir /s /q` can half-fail — retry up to 10x.
  */
-function buildWindowsCleanupScript({ desktopPid, pythonExe, agentRoot, uninstallArgs, appPath, hermesHome }) {
+function buildWindowsCleanupScript({ desktopPid, pythonExe, pythonPath, agentRoot, uninstallArgs, appPath, hermesHome }) {
   const pid = Number(desktopPid) || 0
+  // cmd.exe has no string escaping inside quotes; strip embedded quotes (paths
+  // under %LOCALAPPDATA% never contain them). `&`/`^` in a path would still be
+  // a problem, but Hermes install paths don't use them.
   const q = s => `"${String(s).replace(/"/g, '')}"`
   const lines = [
     '@echo off',
     'setlocal enableextensions',
-    `set HERMES_HOME=${hermesHome}`,
-    `set PID=${pid}`,
-    ':waitloop',
-    'tasklist /FI "PID eq %PID%" 2>nul | find "%PID%" >nul',
-    'if %ERRORLEVEL%==0 (',
-    '  timeout /t 1 /nobreak >nul',
-    '  goto waitloop',
-    ')',
-    `cd /d ${q(agentRoot)}`,
-    `${q(pythonExe)} -m hermes_cli.main ${uninstallArgs.map(q).join(' ')}`
+    `set "HERMES_HOME=${String(hermesHome).replace(/"/g, '')}"`,
+    `set "PID=${pid}"`
   ]
+  if (pythonPath) {
+    lines.push(`set "PYTHONPATH=${String(pythonPath).replace(/"/g, '')};%PYTHONPATH%"`)
+  }
+  lines.push(
+    'set /a waited=0',
+    ':waitloop',
+    'rem /FI "PID eq %PID%" is an EXACT filter — tasklist outputs the one task',
+    'rem row for that PID, or "INFO: No tasks..." otherwise. /NH drops the',
+    'rem header; findstr matches the PID as a whole space-delimited token so',
+    'rem PID 99 cannot match 990 (the substring trap of a bare `find`).',
+    'tasklist /NH /FI "PID eq %PID%" 2>nul | findstr /r /c:" %PID% " >nul',
+    'if %ERRORLEVEL% neq 0 goto waited_done',
+    'set /a waited+=1',
+    'if %waited% geq 60 goto waited_done',
+    'timeout /t 1 /nobreak >nul',
+    'goto waitloop',
+    ':waited_done',
+    `cd /d ${q(agentRoot)}`,
+    `${q(pythonExe)} ${uninstallArgs.map(q).join(' ')}`
+  )
   if (appPath) {
-    // The Electron side already tree-killed every backend + waited for the
-    // venv shim to unlock before launching this script (releaseBackendLock),
-    // so handles should be gone. But Windows releases directory handles
-    // lazily, so a single rmdir can still half-fail — retry up to 10x with a
-    // 1s pause until the tree is actually gone.
     lines.push(
       'set /a tries=0',
       ':rmloop',
