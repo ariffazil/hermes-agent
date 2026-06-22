@@ -1,0 +1,7 @@
+name: minimax
+version: 1.0.0
+description: "MiniMax image generation backend (model: image-01). Text-to-image and image-to-image via https://api.minimax.io/v1/image_generation. Bearer auth, 7 aspect ratios, response_format=url."
+author: arifOS-Federation
+kind: backend
+requires_env:
+  - MINIMAX_API_KEY
