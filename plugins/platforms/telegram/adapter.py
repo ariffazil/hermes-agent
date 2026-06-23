@@ -82,7 +82,7 @@ from gateway.platforms.base import (
     SUPPORTED_IMAGE_DOCUMENT_TYPES,
     utf16_len,
 )
-from gateway.platforms.telegram_network import (
+from .telegram_network import (
     TelegramFallbackTransport,
     discover_fallback_ips,
     parse_fallback_ip_env,
@@ -7090,3 +7090,47 @@ class TelegramAdapter(BasePlatformAdapter):
                 message_id,
                 "\U0001f44d" if outcome == ProcessingOutcome.SUCCESS else "\U0001f44e",
             )
+
+
+# ── Plugin registration ─────────────────────────────────────────────────────
+# Hermes 0.17.0 ships the Telegram plugin in plugins/platforms/telegram/ but
+# the register() hook expected by PluginContext.register_platform() is missing
+# in this checkout. Patch added 2026-06-22 (Arif, FORGE session) so the
+# TelegramAdapter is wired into the platform_registry and the gateway picks it
+# up in _create_adapter() (gateway/run.py:7130-7142). Without this, the
+# gateway logs "No adapter available for telegram" and Hermes never connects.
+
+def register(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Register the Telegram platform adapter with Hermes' plugin system.
+
+    Called by the plugin loader when ``telegram-platform`` is discovered.
+    ``ctx`` is a PluginContext instance (see hermes_cli/plugins.py:817).
+    """
+    def _factory(platform_config):  # type: ignore[no-untyped-def]
+        if not TELEGRAM_AVAILABLE:
+            logger.warning(
+                "telegram plugin: python-telegram-bot not installed; "
+                "run `pip install python-telegram-bot`"
+            )
+            return None
+        if not getattr(platform_config, "token", None):
+            logger.warning("telegram plugin: TELEGRAM_BOT_TOKEN not set")
+            return None
+        return TelegramAdapter(platform_config)
+
+    ctx.register_platform(
+        name="telegram",
+        label="Telegram",
+        adapter_factory=_factory,
+        check_fn=check_telegram_requirements,
+        validate_config=lambda cfg: bool(getattr(cfg, "token", None)),
+        required_env=["TELEGRAM_BOT_TOKEN"],
+        install_hint="pip install python-telegram-bot",
+        emoji="✈️",
+    )
+    logger.info("telegram platform registered via plugin hook (FORGE patch 2026-06-22)")
+
+
+# Bridge function so the plugin's __init__.py `from .adapter import register`
+# resolves. (The __init__.py shipped with Hermes 0.17.0 expects this name.)
+__all__ = ["register", "TelegramAdapter", "check_telegram_requirements"]
