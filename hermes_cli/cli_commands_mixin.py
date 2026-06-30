@@ -2418,3 +2418,63 @@ class CLICommandsMixin:
         else:
             _cprint(f"Unknown voice subcommand: {subcommand}")
             _cprint("Usage: /voice [on|off|tts|status]")
+
+    def _handle_init_command(self, command: str):
+        """Handle /init command — initialize arifOS constitutional session."""
+        import json
+        import requests
+        from cli import _cprint
+
+        parts = command.strip().split(maxsplit=1)
+        actor_id = parts[1].strip() if len(parts) > 1 else "arif"
+
+        _cprint(f"🔐 Initializing arifOS session for actor: {actor_id}...")
+
+        try:
+            # POST to arifOS MCP at port 8088
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "arif_init",
+                    "arguments": {
+                        "mode": "init",
+                        "actor_id": actor_id,
+                        "requested_authority": "SEAL"
+                    }
+                }
+            }
+
+            resp = requests.post(
+                "http://127.0.0.1:8088/mcp",
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=30
+            )
+
+            if resp.status_code == 200:
+                result = resp.json()
+                outer_res = result.get("result", {})
+                content = outer_res.get("content", [])
+                inner_data = {}
+                if content and isinstance(content, list) and len(content) > 0:
+                    text = content[0].get("text", "")
+                    try:
+                        inner_data = json.loads(text)
+                    except Exception:
+                        pass
+                session_id = inner_data.get("session_id") or outer_res.get("session_id", "unknown")
+                authority = inner_data.get("authority_level") or outer_res.get("authority_level", "unknown")
+                _cprint(f"✅ Session initialized: {session_id}")
+                _cprint(f"   Authority: {authority}")
+                _cprint(f"   Actor: {actor_id}")
+            else:
+                _cprint(f"❌ arifOS MCP returned HTTP {resp.status_code}")
+                _cprint(resp.text[:200])
+
+        except requests.exceptions.ConnectionError:
+            _cprint("❌ Cannot connect to arifOS MCP at 127.0.0.1:8088")
+            _cprint("   Ensure arifOS service is running: systemctl status arifos")
+        except Exception as e:
+            _cprint(f"❌ Error: {e}")

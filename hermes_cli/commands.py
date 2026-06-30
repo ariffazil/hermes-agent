@@ -239,6 +239,11 @@ COMMAND_REGISTRY: list[CommandDef] = [
     # Exit
     CommandDef("quit", "Exit the CLI (use --delete to also remove session history)", "Exit",
                cli_only=True, aliases=("exit",), args_hint="[--delete]"),
+
+    # arifOS
+    CommandDef("init", "Initialize arifOS constitutional session — bind actor identity, load floors, open epoch", "Session",
+               aliases=("arifinit",), args_hint="[actor_id]",
+               gateway_only=True),
 ]
 
 

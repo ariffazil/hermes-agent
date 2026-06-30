@@ -8215,6 +8215,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if canonical == "approve":
             return await self._handle_approve_command(event)
 
+        if canonical == "init":
+            return await self._handle_init_command(event)
+
         if canonical == "deny":
             return await self._handle_deny_command(event)
 

@@ -29,6 +29,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional, Union
 
+import httpx
+
 from agent.account_usage import fetch_account_usage, render_account_usage_lines
 from agent.i18n import t
 from gateway.config import HomeChannel, Platform, PlatformConfig
@@ -566,6 +568,54 @@ class GatewaySlashCommandsMixin:
         ])
 
         return "\n".join(lines)
+
+    async def _handle_init_command(self, event: MessageEvent) -> str:
+        """Handle /init — initialize an arifOS constitutional session."""
+        parts = (event.text or "").strip().split(maxsplit=1)
+        actor_id = parts[1].strip() if len(parts) > 1 else "arif"
+
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "arif_init",
+                "arguments": {
+                    "mode": "init",
+                    "actor_id": actor_id,
+                    "requested_authority": "SEAL",
+                },
+            },
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    "http://127.0.0.1:8088/mcp",
+                    json=payload,
+                    headers={"Content-Type": "application/json", "Accept": "application/json"},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as exc:
+            return f"❌ arifOS init failed: {exc}"
+
+        if data.get("error"):
+            return f"❌ arifOS init error: {data['error']}"
+
+        result = data.get("result", {})
+        content = result.get("content", [])
+        inner_data = {}
+        if content and isinstance(content, list) and len(content) > 0:
+            text = content[0].get("text", "")
+            try:
+                inner_data = json.loads(text)
+            except Exception:
+                pass
+
+        session_id = inner_data.get("session_id") or result.get("session_id", "unknown")
+        authority = inner_data.get("authority_level") or result.get("authority_level", "unknown")
+        return f"✅ Session initialized: {session_id}\n   Authority: {authority}\n   Actor: {actor_id}"
 
     @staticmethod
     def _redact_matrix_session_key(session_key: str) -> str:
