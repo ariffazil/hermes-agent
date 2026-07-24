@@ -3437,12 +3437,8 @@ def opencode_model_api_mode(provider_id: Optional[str], model_id: Optional[str])
         return "chat_completions"
 
     if provider == "opencode-go":
-        if normalized.startswith("minimax-"):
-            return "anthropic_messages"
-        if normalized.startswith("qwen"):
-            # All Qwen models on Go (qwen3.7-max, qwen3.7-plus, qwen3.6-plus)
-            # are served via /v1/messages per the published Go endpoint table.
-            return "anthropic_messages"
+        # PROBED 2026-07-23: Go serves MiniMax and Qwen via chat_completions,
+        # NOT anthropic_messages as the published docs claim. 401 on messages.
         return "chat_completions"
 
     if provider == "opencode-zen":

@@ -7562,11 +7562,29 @@ class TelegramAdapter(BasePlatformAdapter):
         event = self._apply_telegram_group_observe_attribution(event)
         await self.handle_message(event)
 
+    _last_location_ts: dict[tuple[int, int], float] = {}
+    _LOCATION_RATE_LIMIT_SECS = 60  # ignore live-location updates faster than this
+
     async def _handle_location_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming location/venue pin messages."""
         msg = self._effective_update_message(update)
         if not msg:
             return
+        # Rate-limit: live location sends updates every few seconds; only
+        # process at most one per _LOCATION_RATE_LIMIT_SECS per (chat, user).
+        chat_id = getattr(getattr(msg, "chat", None), "id", 0)
+        user_id = getattr(getattr(msg, "from_user", None), "id", 0)
+        import time as _time
+        now = _time.monotonic()
+        key = (chat_id, user_id)
+        last = self._last_location_ts.get(key, 0)
+        if now - last < self._LOCATION_RATE_LIMIT_SECS:
+            logger.debug(
+                "[Telegram] Rate-limiting live location from user %s in chat %s (%.0fs since last)",
+                user_id, chat_id, now - last,
+            )
+            return
+        self._last_location_ts[key] = now
         if not self._is_user_authorized_from_message(msg):
             logger.warning(
                 "[Telegram] Blocked unauthorized user %s in chat %s",

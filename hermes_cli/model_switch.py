@@ -1364,6 +1364,31 @@ def switch_model(
     if hermes_warn:
         warnings.append(hermes_warn)
 
+    # --- Picker gate (fail-closed): reject models not in model-picker.yaml ---
+    if target_provider in {"opencode-zen", "opencode-go"}:
+        try:
+            import importlib.util, os as _os
+            _spec = importlib.util.spec_from_file_location(
+                "model_picker_gate",
+                _os.path.expanduser("~/.hermes/plugins/model_picker_gate.py")
+            )
+            if _spec and _spec.loader:
+                _gate = importlib.util.module_from_spec(_spec)
+                _spec.loader.exec_module(_gate)
+                if not _gate.is_model_alive(target_provider, new_model):
+                    return ModelSwitchResult(
+                        success=False,
+                        is_global=is_global,
+                        error_message=(
+                            f"Model '{new_model}' is not in the probed-alive list "
+                            f"for {target_provider}. See /root/.hermes/model-picker.yaml "
+                            f"for allowed models (4 tiers). Use /model with no args to "
+                            f"see available tiers."
+                        ),
+                    )
+        except Exception:
+            pass  # gate module load failed — allow (graceful degrade)
+
     # --- Build result ---
     return ModelSwitchResult(
         success=True,
@@ -2488,6 +2513,30 @@ def list_picker_providers(
             p = dict(p)
             p["models"] = live_ids[:max_models] if max_models is not None else live_ids
             p["total_models"] = len(live_ids)
+
+        # Restrict opencode providers to 4 probed-alive tiers from model-picker.yaml
+        if slug in ("opencode-zen", "opencode-go"):
+            try:
+                import importlib.util, os as _os
+                _spec = importlib.util.spec_from_file_location(
+                    "model_picker_gate",
+                    _os.path.expanduser("~/.hermes/plugins/model_picker_gate.py")
+                )
+                if _spec and _spec.loader:
+                    _gate = importlib.util.module_from_spec(_spec)
+                    _spec.loader.exec_module(_gate)
+                    tier_models = _gate.get_tier_models()
+                    # Filter to models for this provider
+                    tier_ids = [
+                        t["model"] for t in tier_models
+                        if t["provider"] == slug
+                    ]
+                    if tier_ids:
+                        p = dict(p)
+                        p["models"] = tier_ids
+                        p["total_models"] = len(tier_ids)
+            except Exception:
+                pass  # gate unavailable — show full list
 
         has_models = bool(p.get("models"))
         is_custom_endpoint = bool(p.get("is_user_defined")) and bool(p.get("api_url"))
