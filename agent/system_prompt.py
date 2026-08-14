@@ -37,6 +37,7 @@ from agent.prompt_builder import (
     HERMES_AGENT_HELP_GUIDANCE,
     KANBAN_GUIDANCE,
     MEMORY_GUIDANCE,
+    NO_VISION_DISCLAIMER,
     OPENAI_MODEL_EXECUTION_GUIDANCE,
     PARALLEL_TOOL_CALL_GUIDANCE,
     PLATFORM_HINTS,
@@ -408,6 +409,12 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             # existing tools, replies with plans instead of executing).
             if "gpt" in _model_lower or "codex" in _model_lower or "grok" in _model_lower:
                 stable_parts.append(OPENAI_MODEL_EXECUTION_GUIDANCE)
+
+    # Vision-capability disclaimer — all models.  Text-only models rely
+    # on [IMAGE TRANSCRIPT] blocks; the rule tells them never to claim
+    # they see pixels.  Vision-native models never see IMAGE TRANSCRIPT
+    # blocks, so the same text is benign for them.
+    stable_parts.append(NO_VISION_DISCLAIMER)
 
     has_skills_tools = any(name in agent.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
     if has_skills_tools:
