@@ -505,6 +505,23 @@ GOOGLE_MODEL_OPERATIONAL_GUIDANCE = (
 )
 
 
+# Vision-capability disclaimer — injected when the active model does NOT
+# have native vision (e.g. DeepSeek V4 Flash, all text-only models).
+# Prevents the model from claiming to "see" images that it received as
+# [IMAGE TRANSCRIPT] blocks.  Vision-native models (Claude, GPT-4o, Gemini)
+# skip this block because they DO see the raw pixels via native image_url
+# content parts.
+NO_VISION_DISCLAIMER = (
+    "# Vision capability note\n"
+    "You have NO native vision capability. You receive images ONLY as "
+    "structured text transcripts marked with [IMAGE TRANSCRIPT]. "
+    "You must NEVER claim to see, read, or interpret an image directly "
+    "unless an [IMAGE TRANSCRIPT] block is present in the conversation. "
+    "If the user references an image with no transcript, respond: "
+    "'I can't see images directly — let me process it through my vision "
+    "module first.' Never fabricate what an image contains."
+)
+
 # Guidance injected into the system prompt when the computer_use toolset
 # is active. Universal — works for any model (Claude, GPT, open models).
 # Built per-platform via computer_use_guidance() so Windows/Linux hosts
