@@ -207,3 +207,4 @@ native/fts5_cjk/*.so
 .restart_failure_counts
 .restart_last_processed.json
 .skills_prompt_snapshot.json
+venv/
