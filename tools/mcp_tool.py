@@ -301,7 +301,11 @@ def _ensure_mcp_sdk() -> bool:
                 from mcp.client.streamable_http import streamablehttp_client
                 _MCP_HTTP_AVAILABLE = True
             except ImportError:
-                _MCP_HTTP_AVAILABLE = False
+                try:
+                    from mcp.client.streamable_http import streamable_http_client as streamablehttp_client
+                    _MCP_HTTP_AVAILABLE = True
+                except ImportError:
+                    _MCP_HTTP_AVAILABLE = False
             # Prefer the non-deprecated API (mcp >= 1.24.0); fall back to the
             # deprecated wrapper for older SDK versions.
             try:
@@ -3242,13 +3246,42 @@ class MCPServerTask:
                     "enforce the portable redirect-header boundary "
                     "(strict_redirect_headers). Upgrade the mcp package."
                 )
+            # mcp < 1.24 streamablehttp_client has no `verify` kwarg
+            # (KVM4 2026-09-02: passing it parked every HTTP MCP client).
+            # Default TLS stays on httpx; non-default verify/cert go through
+            # httpx_client_factory, which this SDK does accept.
             _http_kwargs: dict = {
                 "headers": headers,
                 "timeout": float(connect_timeout),
-                "verify": ssl_verify,
             }
             if _oauth_auth is not None:
                 _http_kwargs["auth"] = _oauth_auth
+            if client_cert is not None or ssl_verify is not True:
+                import httpx as _httpx_mod
+
+                _cert_for_http = client_cert
+                _verify_for_http = ssl_verify
+
+                def _mcp_streamable_http_client_factory(
+                    headers=None, timeout=None, auth=None,
+                ):
+                    kwargs: dict = {
+                        "follow_redirects": True,
+                        "verify": _verify_for_http,
+                    }
+                    if timeout is not None:
+                        kwargs["timeout"] = timeout
+                    else:
+                        kwargs["timeout"] = _httpx_mod.Timeout(30.0, read=300.0)
+                    if headers is not None:
+                        kwargs["headers"] = headers
+                    if auth is not None:
+                        kwargs["auth"] = auth
+                    if _cert_for_http is not None:
+                        kwargs["cert"] = _cert_for_http
+                    return _httpx_mod.AsyncClient(**kwargs)
+
+                _http_kwargs["httpx_client_factory"] = _mcp_streamable_http_client_factory
             try:
                 async with streamablehttp_client(url, **_http_kwargs) as (
                     read_stream, write_stream, _get_session_id,
