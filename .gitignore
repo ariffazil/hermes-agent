@@ -208,3 +208,8 @@ native/fts5_cjk/*.so
 .restart_last_processed.json
 .skills_prompt_snapshot.json
 venv/
+auth.json
+auth.lock
+active_profile
+.update_check
+verification_evidence.db
