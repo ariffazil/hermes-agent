@@ -1178,6 +1178,27 @@ class TelegramAdapter(BasePlatformAdapter):
         if not user_id:
             return True
 
+        # Anti-Echo & Anti-Bot Ingress Guard (A3 doctrine / F12 fail-closed):
+        # Never process incoming messages authored by a bot or targeted at the bot's own ID.
+        bot_id_str = str(getattr(getattr(self, "_bot", None), "id", "") or "")
+        sender_user = getattr(message, "from_user", None)
+        sender_chat = getattr(message, "chat", None)
+        u_id = str(getattr(sender_user, "id", "") or user_id or "").strip()
+        c_id = str(getattr(sender_chat, "id", "") or getattr(source, "chat_id", "") or "").strip()
+
+        if bot_id_str and (u_id == bot_id_str or c_id == bot_id_str):
+            logger.debug("[Telegram] Dropping self-chat message (user=%s, chat=%s)", u_id, c_id)
+            return False
+        if getattr(sender_user, "is_bot", False):
+            logger.debug("[Telegram] Dropping message from bot user %s (@%s)", u_id, getattr(sender_user, "username", None))
+            return False
+        if sender_user and getattr(sender_user, "username", "") and str(sender_user.username).lower().endswith("_bot"):
+            logger.debug("[Telegram] Dropping message from _bot user %s (@%s)", u_id, sender_user.username)
+            return False
+        if u_id in {"8324190535", "8410138119"} or c_id in {"8324190535", "8410138119"}:
+            logger.debug("[Telegram] Dropping message from forbidden ID (user=%s, chat=%s)", u_id, c_id)
+            return False
+
         authorized: Optional[bool] = None
 
         # Adapter-level allow_from / group_allow_from: when set, they are the
@@ -1476,6 +1497,11 @@ class TelegramAdapter(BasePlatformAdapter):
         reset_media: Optional[Any] = None,
     ) -> Any:
         """Retry stale private-topic media replies once without the topic anchor."""
+        chat_id_arg = str(send_kwargs.get("chat_id", "")).strip()
+        bot_id = getattr(getattr(self, "_bot", None), "id", None)
+        if (bot_id and chat_id_arg == str(bot_id)) or chat_id_arg in {"8410138119", "8324190535"}:
+            logger.debug("[%s] Suppressed media/retry send to bot itself or forbidden target %s", self.name, chat_id_arg)
+            return None
         try:
             return await send_fn(**send_kwargs)
         except Exception as send_err:
@@ -4814,6 +4840,13 @@ class TelegramAdapter(BasePlatformAdapter):
         # Skip whitespace-only text to prevent Telegram 400 empty-text errors.
         if not content or not content.strip():
             return SendResult(success=True, message_id=None)
+
+        # Anti-echo guard: bot cannot send message to itself or forbidden bot targets
+        bot_id = getattr(self._bot, "id", None)
+        target_str = str(chat_id).strip()
+        if (bot_id and target_str == str(bot_id)) or target_str in {"8410138119", "8324190535"}:
+            logger.debug("[%s] Suppressed send to bot's own ID or forbidden target %s", self.name, chat_id)
+            return SendResult(success=False, error="Cannot send message to bot itself or forbidden bot target")
         
         try:
             # Bot API 10.1 rich fast-path: send the raw agent markdown via
@@ -7907,6 +7940,11 @@ class TelegramAdapter(BasePlatformAdapter):
         if not self._bot or self._typing_in_cooldown(chat_id):
             return
 
+        bot_id = getattr(self._bot, "id", None)
+        c_str = str(chat_id).strip()
+        if (bot_id and c_str == str(bot_id)) or c_str in {"8410138119", "8324190535"}:
+            return
+
         _is_dm_topic: bool = False
         message_thread_id: Optional[int] = None
         try:
@@ -10337,7 +10375,11 @@ def _is_connected(config) -> bool:
     token = getattr(config, "token", None)
     if not token:
         import hermes_cli.gateway as gateway_mod
-        token = gateway_mod.get_env_value("TELEGRAM_BOT_TOKEN") or ""
+        token = (
+            gateway_mod.get_env_value("TELEGRAM_BOT_TOKEN")
+            or gateway_mod.get_env_value("ASI_ARIFOS_BOT_TOKEN")
+            or ""
+        )
     return bool(str(token).strip())
 
 
@@ -10362,7 +10404,11 @@ async def _standalone_send(
         # borrowing another profile's env-bridged token under multiplex.
         from agent.secret_scope import get_secret
 
-        token = get_secret("TELEGRAM_BOT_TOKEN", "") or ""
+        token = (
+            get_secret("TELEGRAM_BOT_TOKEN", "")
+            or get_secret("ASI_ARIFOS_BOT_TOKEN", "")
+            or ""
+        )
     disable_link_previews = bool(
         getattr(pconfig, "extra", {}) and pconfig.extra.get("disable_link_previews")
     )
@@ -10413,6 +10459,16 @@ def _apply_yaml_config(yaml_cfg: dict, telegram_cfg: dict) -> dict | None:
         _skip_env_bridge = bool(is_multiplex_active() and current_secret_scope() is not None)
     except Exception:
         _skip_env_bridge = False
+
+    bte = telegram_cfg.get("bot_token_env")
+    if bte:
+        extras["bot_token_env"] = bte
+        if not _skip_env_bridge and not os.getenv("TELEGRAM_BOT_TOKEN"):
+            bte_val = os.getenv(bte)
+            if bte_val:
+                os.environ["TELEGRAM_BOT_TOKEN"] = bte_val
+    elif not _skip_env_bridge and not os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("ASI_ARIFOS_BOT_TOKEN"):
+        os.environ["TELEGRAM_BOT_TOKEN"] = os.getenv("ASI_ARIFOS_BOT_TOKEN")
 
     if "disable_topic_auto_rename" in telegram_cfg:
         extras.setdefault("disable_topic_auto_rename", telegram_cfg["disable_topic_auto_rename"])

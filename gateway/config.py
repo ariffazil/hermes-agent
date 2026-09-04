@@ -1908,6 +1908,12 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     
     # Telegram
     telegram_token = getenv("TELEGRAM_BOT_TOKEN")
+    if not telegram_token and Platform.TELEGRAM in config.platforms:
+        _bte = config.platforms[Platform.TELEGRAM].extra.get("bot_token_env")
+        if _bte:
+            telegram_token = getenv(_bte)
+    if not telegram_token:
+        telegram_token = getenv("ASI_ARIFOS_BOT_TOKEN")
     if telegram_token:
         telegram_config = _enable_from_env(Platform.TELEGRAM)
         telegram_config.token = telegram_token

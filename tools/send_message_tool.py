@@ -1311,6 +1311,9 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
         from telegram import Bot
         from telegram.constants import ParseMode
 
+        if not token:
+            token = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("ASI_ARIFOS_BOT_TOKEN") or ""
+
         # Auto-detect HTML tags — if present, skip MarkdownV2 and send as HTML.
         # Inspired by github.com/ashaney — PR #1568.
         _has_html = bool(re.search(r'<[a-zA-Z/][^>]*>', message))
@@ -1360,6 +1363,10 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
         # Telegram accepts a numeric chat_id OR an @username string; normalize
         # rather than force-int so username home channels don't crash (#13206).
         int_chat_id = normalize_telegram_chat_id(chat_id)
+        if getattr(bot, "id", None) and str(int_chat_id) == str(bot.id):
+            return {"error": "Cannot send message to bot itself"}
+        if str(int_chat_id) in {"8410138119", "8324190535"}:
+            return {"error": "Cannot send message to bot itself or forbidden bot target"}
         media_files = media_files or []
         thread_kwargs = {}
         if thread_id is not None:
