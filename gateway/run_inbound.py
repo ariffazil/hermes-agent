@@ -2017,6 +2017,31 @@ class GatewayInboundMixin:
         enriched_text, successful_transcripts = await self._enrich_message_with_transcription(text, audio_paths)
         event._gateway_pending_stt_text = enriched_text
         event._gateway_pending_stt_transcripts = list(successful_transcripts)
+
+        # ── Voice-state extraction (Layer 1 — membrane sensor) ──
+        # Extract prosody features from raw audio for WELL homeostasis.
+        # F9: sensor measures, sensor does NOT speak about what it measures.
+        # Runs once per message after STT succeeds; never blocks, never raises,
+        # never injects into the transcript or LLM context.
+        _vpaths = self._pending_event_audio_paths(event)
+        if successful_transcripts and not hasattr(event, "_gateway_voice_state") and _vpaths:
+            try:
+                from tools.voice_state import extract_voice_state as _extract_vs
+                _first_audio = _vpaths[0]
+                _vs_features = await asyncio.to_thread(_extract_vs, _first_audio)
+                if _vs_features:
+                    setattr(event, "_gateway_voice_state", _vs_features)
+                    logger.info(
+                        "voice_state: extracted features from %s "
+                        "(pause_density=%.3f, energy=%.1fdB, pitch_mean=%.1fHz)",
+                        _first_audio,
+                        _vs_features.get("pause_density", 0),
+                        _vs_features.get("energy_rms_mean_db", -60),
+                        _vs_features.get("pitch_mean_hz", 0),
+                    )
+            except Exception as _vs_exc:
+                logger.debug("voice_state: extraction skipped: %s", _vs_exc)
+
         return enriched_text, successful_transcripts
 
     async def _echo_pending_stt_transcripts_once(

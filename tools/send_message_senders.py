@@ -238,9 +238,11 @@ def _telegram_format(message):
 
 async def _send_telegram(token, chat_id, message, media_files=None, thread_id=None, disable_link_previews=False, force_document=False):
     """One-shot Telegram Bot API send; parse failures fall back to plain text."""
+    bot = None
     try:
         formatted, send_parse_mode, _has_html = _telegram_format(message)
         bot = _telegram_bot(token)
+        await bot.initialize()
         from plugins.platforms.telegram.telegram_ids import normalize_telegram_chat_id
         from gateway.platforms.base import BasePlatformAdapter, utf16_len
         # Telegram accepts a numeric chat_id OR an @username string; never force-int.
@@ -287,6 +289,12 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
         return {"error": "python-telegram-bot not installed. Run: pip install python-telegram-bot"}
     except Exception as e:
         return _error(f"Telegram send failed: {e}")
+    finally:
+        if bot is not None:
+            try:
+                await bot.shutdown()
+            except Exception:
+                pass
 
 
 def _live_adapter(platform, *, lookup_failed_warning=None):
