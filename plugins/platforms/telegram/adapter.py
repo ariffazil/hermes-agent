@@ -5645,6 +5645,13 @@ class TelegramAdapter(BasePlatformAdapter):
         self._observe_bot_identity_from_message(message)
         if self._is_own_message(message):
             return False
+        # A2H default: ignore other bots (Telegram forbids bot-to-bot DMs; it
+        # flooded errors.log). A2A exception: AAA group is the musyawarah room
+        # (Hermes ↔ OpenClaw ↔ FORGE). Never A2A in SADO or private DMs.
+        if self._sender_is_other_bot(message):
+            a2a_chat = str(self._chat_id_str(message) or "").split(":")[0]
+            if a2a_chat != "-1003753855708":
+                return False
         if not self._is_group_chat(message):
             return True
         thread_id = self._effective_message_thread_id(message)
