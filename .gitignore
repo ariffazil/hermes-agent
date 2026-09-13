@@ -260,3 +260,8 @@ ollama_cloud_models_cache.json
 run_agent.py.bak
 plugins/platforms/telegram/adapter.py.bak*
 plugins/platforms/telegram/adapter.py.orig
+gateway/restart_loop.json
+kanban.db.*
+scripts/refresh-vault-data.sh
+scripts/sado_followup_nudge.sh
+skills/*
