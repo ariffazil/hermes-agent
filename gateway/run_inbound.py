@@ -2041,6 +2041,17 @@ class GatewayInboundMixin:
                         _vs_features.get("energy_rms_mean_db", -60),
                         _vs_features.get("pitch_mean_hz", 0),
                     )
+                    # Hand the sensor reading to the membrane sink (hook: voice:state).
+                    # F9: stays measurement; F1: local persistence only; W0: never gates.
+                    try:
+                        await self.hooks.emit("voice:state", {
+                            "features": _vs_features,
+                            "source": "stt_layer1",
+                            "session_id": getattr(event, "session_id", None),
+                            "chat_id": str(getattr(getattr(event, "source", None), "chat_id", "") or ""),
+                        })
+                    except Exception:
+                        pass
             except Exception as _vs_exc:
                 logger.debug("voice_state: extraction skipped: %s", _vs_exc)
 
