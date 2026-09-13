@@ -12,6 +12,8 @@ from __future__ import annotations
 import atexit
 import json
 import logging
+import os
+import re
 import threading
 import time
 from contextlib import suppress
@@ -42,13 +44,149 @@ _DEFAULT_USER_ID = "hermes-user"
 # bge-small-zh-v1.5:f16); ``sync_max_chars`` in mem0.json raises it for larger windows.
 _SYNC_MSG_MAX_CHARS = 450
 
+# ---------------------------------------------------------------------------
+# AAA carry (2026-09-11): PROMOTION GATE — "Witness is cheap, Memory is expensive."
+# Root cause of mem0 inflation (11,288 points in 6 days ≈ 1,900/day): sync_turn
+# sent EVERY turn to the LLM extractor with infer=True, so episodic chit-chat
+# ("shared a photo of nasi lemak", "sent a test voice message") was promoted to
+# permanent semantic memory alongside sealed doctrine. Recall then drowned in
+# episodic noise, and the same doctrine was re-extracted in 2-8 paraphrases.
+#
+# Arif's four gates, applied as a cheap deterministic pre-filter (no LLM cost,
+# no latency). A rejected turn stays in the conversation log — it is witnessed,
+# just not promoted. Every rejection is appended to a ledger (F11 auditability).
+#   Gate C — does this change future decisions?  trivial/no  -> witness only
+#   Gate D — new primitive or new example?       example     -> witness only
+# ---------------------------------------------------------------------------
+_GATE_LEDGER_NAME = "mem0-promotion-ledger.jsonl"
+
+# Machine-generated scaffolding. These are NOT human content and NOT facts about
+# the world — they are runtime plumbing that repeats identically every fire.
+# Falsification test (2026-09-11, 4,999 real turns) found 1,249 of these being
+# promoted because their *system instructions* contain "must"/"never"/"should",
+# tripping the signal rule. A daily cron prompt re-extracted every day is a
+# duplication engine, not a memory. Reject before the signal check.
+_GATE_SCAFFOLD_PATTERNS = (
+    re.compile(r"\[IMPORTANT: You are running as a scheduled cron job", re.I),
+    re.compile(r"\[ASYNC DELEGATION COMPLETE\b", re.I),
+    re.compile(r"The user sent a (?:document|file|attachment):", re.I),
+    re.compile(r"^\s*<memory-context>", re.I),
+    re.compile(r"\[System note:", re.I),
+    re.compile(r"^\s*(?:tool[_-]?result|function[_-]?result)\b", re.I),
+)
+
+# Genuine human mid-turn steering, wrapped in a marker. NOT scaffolding — it
+# carries the same authority as the original request, so a correction here must
+# not be dropped. Unwrap and evaluate the inner content.
+_GATE_OOB_WRAP = re.compile(
+    r"\[OUT-OF-BAND USER MESSAGE.*?\](.*?)(?:\[/OUT-OF-BAND USER MESSAGE\]|$)", re.S)
+
+# Identity prefixes injected by the gateway (e.g. "[ARIF|267378578] ...").
+# These ARE real human content — strip the prefix and evaluate what remains.
+_GATE_IDENTITY_PREFIX = re.compile(r"^\s*\[[A-Z0-9_@\.\-\s|]{1,60}\]\s*")
+
+# Pure-noise turn shapes: media plumbing, greetings, acks, routine status.
+_GATE_NOISE_PATTERNS = (
+    re.compile(r"^\s*(MEDIA|ATTACHMENT|FILE):", re.I),
+    re.compile(r"^\s*\[(?:image|photo|sticker|video|audio|document|voice)\b", re.I),
+    re.compile(r"^\s*(?:salam|hi|hello|hey|ok|okay|oke|ya|yup|yes|no|thx|thanks|thank you|ty|k|👍|❤|🔥)[\s!.,]*$", re.I),
+    re.compile(r"^\s*(?:good\s*(?:morning|night|afternoon|evening)|selamat\s*(?:pagi|malam))[\s!.,]*$", re.I),
+    re.compile(r"\b(?:generated and shared a media file|sent a test (?:voice )?message|"
+               r"(?:requested|generated) an? (?:ai[- ]generated )?(?:image|photo|picture|sticker|video)|"
+               r"shared a (?:photo|screenshot|image|picture) of|forwarded a photo)\b", re.I),
+    re.compile(r"\b(?:no new traces from|health (?:check|probe) (?:showed|reported)|"
+               r"all (?:organs|surfaces) (?:are )?(?:healthy|green))\b", re.I),
+)
+
+# Substantive markers that OVERRIDE a length-based rejection — a short turn can
+# still carry doctrine or a durable correction. Never gate these out.
+_GATE_SIGNAL_PATTERNS = (
+    re.compile(r"\b(SEALED|canonical|doctrine|invariant|primitive|axiom|EUREKA|"
+               r"F(?:1[0-3]|[1-9])\b|HARAM|scar|constitution|ratified|DITEMPA)\b"),
+    re.compile(r"\b(prefer|always|never|must|should|stop|don'?t|jangan|sentiasa|ingat)\b", re.I),
+    re.compile(r"\b(remember|recall|note that|correct(?:ion)?|actually|sebenarnya)\b", re.I),
+    # Bahasa Melayu markers. Arif's primary register is BM, and a short BM
+    # correction ("Hang salah. Abang sado x amik kasut hitam") is exactly the
+    # high-value/low-length content the length rule would otherwise drop.
+    # Caught by the honest eval on 4,999 real turns (2026-09-11) as the sole
+    # substantive loss before this rule existed.
+    re.compile(r"\b(salah|silap|betul|betol|bukan|tak\s|tidak|x\s|jangan|"
+               r"sebenarnya|ingat|sentiasa|selalu|kena|perlu|mesti)\b", re.I),
+)
+
+
+def _promotion_gate(user_content: str, *, min_chars: int, ledger_path: Path | None = None) -> tuple[bool, str]:
+    """Decide whether a turn deserves promotion to semantic memory.
+
+    Returns (allow, reason). Deterministic and cheap by design — this runs on
+    every turn, so it must never call a model or block.
+    """
+    text = (user_content or "").strip()
+    if not text:
+        return False, "empty"
+
+    # Unwrap genuine human mid-turn steering before anything else, so the
+    # markers never make it look like scaffolding.
+    if _GATE_OOB_WRAP.search(text):
+        inner = " ".join(m.group(1).strip() for m in _GATE_OOB_WRAP.finditer(text)).strip()
+        if inner:
+            text = inner
+
+    # Machine scaffolding is rejected outright: it is runtime plumbing that
+    # repeats verbatim every fire, not a fact about the world.
+    for pat in _GATE_SCAFFOLD_PATTERNS:
+        if pat.search(text):
+            return False, "scaffolding"
+
+    # Gateway identity prefix ("[ARIF|267378578] ...") is real human content —
+    # strip it so the prefix can't inflate the substance measurement.
+    text = _GATE_IDENTITY_PREFIX.sub("", text, count=1).strip()
+
+    # Strip tool-result / scaffolding bulk so length reflects real human content.
+    body = re.sub(r"<(tool[_-]?result|system-reminder|memory-context)\b[^>]*>.*?</\1>", " ", text,
+                  flags=re.S | re.I)
+    body = re.sub(r"https?://\S+", " ", body).strip()
+
+    # Signal is checked FIRST and overrides noise shape. A turn can look routine
+    # and still carry a sealed verdict — falsification test (2026-09-11) caught
+    # "Milestone Receipt: Cognition Spine Sealed" being dropped by the
+    # all-organs-healthy noise rule. Losing a SEAL is worse than keeping noise.
+    if any(p.search(body) for p in _GATE_SIGNAL_PATTERNS):
+        return True, "promoted_signal"
+
+    for pat in _GATE_NOISE_PATTERNS:
+        if pat.search(body):
+            return False, "noise_shape"
+
+    if len(body) < min_chars:
+        # Gate C: too little substance to change a future decision.
+        return False, "insufficient_substance"
+
+    return True, "promoted"
+
+
+def _log_gate_decision(ledger_path: Path | None, allowed: bool, reason: str, preview: str) -> None:
+    """Append the decision to the promotion ledger (F11). Never raises."""
+    if ledger_path is None:
+        return
+    try:
+        ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        with ledger_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "verdict": "PROMOTE" if allowed else "WITNESS_ONLY",
+                "reason": reason,
+                "preview": preview[:160],
+            }) + "\n")
+    except Exception:  # ledger must never break the memory path
+        logger.debug("mem0 promotion ledger write failed", exc_info=True)
+
 
 # Sentence ends recognized when trimming a synced message. Deliberately unordered:
 # the LAST boundary of ANY kind wins, so one CJK stop early in a mixed-script turn
 # cannot outrank a Latin stop near the end of the window. ``".\n"`` is not listed —
 # its index can never exceed the bare ``"."`` it starts with.
 _SYNC_SENTENCE_ENDS = ("。", "！", "？", ".", "!", "?")
-
 
 def _truncate_for_sync(text: str, max_len: int = _SYNC_MSG_MAX_CHARS) -> str:
     """Cap a synced message at its last sentence boundary within ``max_len``.
@@ -135,6 +273,8 @@ class Mem0MemoryProvider(MemoryProvider):
         self._prefetch_done = self._atexit_registered = False
         self._consecutive_failures, self._breaker_open_until = 0, 0.0  # circuit breaker state
         self._breaker_lock, self._sync_lock, self._prefetch_lock = threading.Lock(), threading.Lock(), threading.Lock()
+        # AAA carry (2026-09-11): promotion gate state (configured in initialize()).
+        self._gate_enabled, self._gate_min_chars, self._gate_ledger = True, 60, None
 
     @property
     def name(self) -> str:
@@ -231,11 +371,35 @@ class Mem0MemoryProvider(MemoryProvider):
         # The literal placeholder counts as unset so wizard users still get gateway-native ids.
         configured = cfg.get("user_id")
         self._user_id = (None if configured == _DEFAULT_USER_ID else configured) or kwargs.get("user_id") or _DEFAULT_USER_ID
+        # AAA carry (2026-09-11): principal_map unifies the channel identities that belong to
+        # the SAME human into one recall pool. Without it, search is scoped to a single
+        # gateway-native user_id, so Telegram writes (267378578) are invisible to CLI recall
+        # (hermes-user) and vice versa — 37.8% of one person's memory was unreachable.
+        # Identities NOT listed stay isolated by design (F6 MARUAH air-gap between people).
+        _pmap = cfg.get("principal_map") or {}
+        if isinstance(_pmap, dict) and _pmap:
+            self._user_id = str(_pmap.get(str(self._user_id), self._user_id))
         # Persisted rerank preference: default for mem0_search when the model omits ``rerank``. Platform-only.
         _rr = cfg.get("rerank", False)
         self._rerank_default = _rr.lower() in ("true", "1", "yes") if isinstance(_rr, str) else bool(_rr)
         self._channel = kwargs.get("platform") or "cli"
         self._sync_max_chars = int(cfg.get("sync_max_chars") or _SYNC_MSG_MAX_CHARS)
+        # AAA carry (2026-09-11): promotion gate config. Defaults ON — the whole
+        # point of the carry. ``promotion_gate`` in mem0.json can disable or tune it:
+        #   {"promotion_gate": {"enabled": true, "min_chars": 60}}
+        _pg = cfg.get("promotion_gate")
+        if isinstance(_pg, dict):
+            self._gate_enabled = bool(_pg.get("enabled", True))
+            try:
+                self._gate_min_chars = int(_pg.get("min_chars", 60))
+            except (TypeError, ValueError):
+                self._gate_min_chars = 60
+        else:
+            self._gate_enabled, self._gate_min_chars = True, 60
+        if self._gate_enabled:
+            from hermes_constants import get_hermes_home
+            with suppress(Exception):
+                self._gate_ledger = Path(get_hermes_home()) / _GATE_LEDGER_NAME
         self._backend = self._create_backend()
         if self._backend and not self._atexit_registered:
             atexit.register(self._shutdown_backend)
@@ -303,6 +467,23 @@ class Mem0MemoryProvider(MemoryProvider):
         """Send the turn to Mem0 for server-side fact extraction (non-blocking)."""
         if self._backend is None or self._is_breaker_open():
             return
+
+        # AAA carry (2026-09-11): promotion gate. Fail-open — any gate error
+        # must never cost the turn its memory (F1 AMANAH: prefer a little
+        # noise over silent loss of a real correction).
+        if self._gate_enabled:
+            try:
+                allow, reason = _promotion_gate(
+                    user_content,
+                    min_chars=self._gate_min_chars,
+                    ledger_path=self._gate_ledger,
+                )
+                _log_gate_decision(self._gate_ledger, allow, reason, (user_content or "").strip())
+                if not allow:
+                    logger.debug("mem0 promotion gate: witness-only (%s)", reason)
+                    return
+            except Exception:
+                logger.debug("mem0 promotion gate failed open", exc_info=True)
 
         def _sync():
             if self._backend is not None:

@@ -498,6 +498,21 @@ GOOGLE_MODEL_OPERATIONAL_GUIDANCE = (
 )
 
 
+# Vision-capability disclaimer — injected for all models. Text-only models
+# receive images as [IMAGE TRANSCRIPT] blocks only; the rule forbids claiming
+# pixel-level sight. Benign for vision-native models. Generic — upstreamable.
+NO_VISION_DISCLAIMER = (
+    "# Vision capability note\n"
+    "You have NO native vision capability. You receive images ONLY as "
+    "structured text transcripts marked with [IMAGE TRANSCRIPT]. "
+    "You must NEVER claim to see, read, or interpret an image directly "
+    "unless an [IMAGE TRANSCRIPT] block is present in the conversation. "
+    "If the user references an image with no transcript, respond: "
+    "'I can't see images directly — let me process it through my vision "
+    "module first.' Never fabricate what an image contains."
+)
+
+
 # computer_use has no prompt block on purpose: its guidance lives in the tool
 # schema and each action result's verdict.
 

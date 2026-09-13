@@ -225,3 +225,44 @@ native/fts5_cjk/*.so
 
 # Disposable profile created by scripts/probe_active_session_exclusivity.py
 .probe-home/
+
+# ── live seat runtime state (never commit) ──────────────────────────────
+# Re-applied from carry-v0.20.1 (leak-guard) + observed strays 2026-09-13.
+# The code tree doubles as a live seat; runtime writes are not source.
+.audit/
+.restart_failure_counts
+.restart_last_processed.json
+venv/
+auth.json
+auth.lock
+active_profile
+.update_check
+verification_evidence.db
+config.yaml
+config.yaml.bak-*
+state.db
+sessions.db
+kanban.db
+kanban.db-*
+kanban/
+sessions/
+state/
+memories/
+profiles/
+cron/
+channel_directory.json
+gateway_state.json
+gateway.lock
+honcho.json
+cache/
+models_dev_cache.json
+provider_models_cache.json
+ollama_cloud_models_cache.json
+run_agent.py.bak
+plugins/platforms/telegram/adapter.py.bak*
+plugins/platforms/telegram/adapter.py.orig
+gateway/restart_loop.json
+kanban.db.*
+scripts/refresh-vault-data.sh
+scripts/sado_followup_nudge.sh
+skills/*
