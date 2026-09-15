@@ -122,6 +122,18 @@ def check_skills_requirements() -> bool:
 
 _MATRIX_CACHE: dict = {"sig": None, "map": {}}
 
+# First-party sovereign skill catalogs. The profile mounts these by symlink on purpose (canonical
+# federation catalog + harness views). See _first_party_skill_target() below — a symlink pointing
+# anywhere outside this list still raises the untrusted-source warning.
+_FIRST_PARTY_SKILL_ROOTS = tuple(
+    Path(p) for p in (
+        "/root/AAA/skills",
+        "/root/.agents/skills",
+        "/root/.config/opencode/skills",
+        "/root/WELL/skills",
+    )
+)
+
 
 def _matrix_coordinate_for(skill_name: str) -> Optional[str]:
     """Coordinate for a skill whose FILE is not in the taxonomy tree.
@@ -553,6 +565,34 @@ def _locate_skill(name: str, local_category_name: Optional[str], project_dirs: l
     return None, skill_dir, skill_md
 
 
+def _first_party_skill_target(skill_md: Path, active_skills_dir: Path):
+    """True when a skill's LEXICAL path is inside the profile's skills dir and its resolved target
+    is a first-party sovereign catalog. Those are mounted by symlink on purpose (canonical catalog +
+    harness views), so the symlink is topology, not an untrusted ingress.
+
+    The guard keeps its teeth: the lexical path must still be inside ``active_skills_dir``, and the
+    resolved target must be in the allowlist below. A symlink pointing anywhere else (``/tmp``, a
+    curl'd dir, a repo checkout) still warns. This adds no reach an attacker did not already have —
+    writing the symlink requires write access to the skills dir, with which they could write a
+    SKILL.md directly.
+
+    LOCAL PATCH (arifOS, 2026-09-15): 53 of 406 live skills mount the federation's canonical
+    catalog by symlink, so every load of an AAA-*/substrate/WELL skill emitted a spurious
+    "outside the trusted directory" warning. A security warning that fires on the majority of
+    legitimate loads trains the reader to ignore it, which is worse than no warning.
+    """
+    try:
+        real = skill_md.resolve()
+    except Exception:
+        return False
+    # lexical path AS WRITTEN (no symlink resolution) must be inside the profile skills dir;
+    # abspath() normalises but deliberately does not follow symlinks.
+    lexical = os.path.abspath(str(skill_md))
+    if not lexical.startswith(os.path.abspath(str(active_skills_dir))):
+        return False
+    return any(real.is_relative_to(root) for root in _FIRST_PARTY_SKILL_ROOTS)
+
+
 def _log_security_warnings(name: str, skill_md: Path, content: str, all_dirs, active_skills_dir):
     """Warn (never block) when loaded from outside the trusted dirs (project + local + external)
     and/or when common prompt-injection patterns appear."""
@@ -560,7 +600,8 @@ def _log_security_warnings(name: str, skill_md: Path, content: str, all_dirs, ac
     with suppress(Exception):
         trusted_dirs.extend(d.resolve() for d in all_dirs)
     warnings = []
-    if not _under_any(skill_md, trusted_dirs):
+    if (not _under_any(skill_md, trusted_dirs)
+            and not _first_party_skill_target(skill_md, active_skills_dir)):
         warnings.append(f"skill file is outside the trusted skills directory (~/.hermes/skills/): {skill_md}")
     if any(p in content.lower() for p in _INJECTION_PATTERNS):
         warnings.append("skill content contains patterns that may indicate prompt injection")
