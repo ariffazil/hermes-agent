@@ -122,15 +122,28 @@ def check_skills_requirements() -> bool:
 
 def _get_category_from_path(skill_path: Path) -> Optional[str]:
     """``~/.hermes/skills/mlops/axolotl/SKILL.md`` -> ``"mlops"``; active profile dir first
-    (respects test monkeypatching), then skills.external_dirs."""
+    (respects test monkeypatching), then skills.external_dirs.
+
+    LOCAL PATCH (arifOS, 2026-09-15): the taxonomy tree is orthogonal and deeper than one
+    level — ``domains/<domain>/<organ>/<capability>/<skill>/SKILL.md``. Reporting only
+    ``parts[0]`` collapsed all 399 skills into the single literal category ``"domains"``,
+    which is less legible than the flat root bucket it replaced. So: for the classic
+    ``category/skill`` layout keep returning ``parts[0]`` unchanged; for anything nested
+    deeper, return the full parent path (skill dir dropped), e.g.
+    ``domains/general/forge/mcp-ops`` — all three axes visible in the listing."""
     dirs_to_check = [_skills_dir()]
     with suppress(Exception):
         from agent.skill_utils import get_external_skills_dirs
         dirs_to_check.extend(get_external_skills_dirs())
     for skills_dir in dirs_to_check:
         with suppress(ValueError):
-            if len(parts := skill_path.relative_to(skills_dir).parts) >= 3:
-                return parts[0]
+            parts = skill_path.relative_to(skills_dir).parts
+            if len(parts) < 3:
+                continue
+            parent = parts[:-1]                      # drop the SKILL.md filename
+            if len(parent) == 2:                     # category/skill
+                return parent[0]
+            return "/".join(parent[:-1])             # nested: coordinate path, leaf dropped
     return None
 
 
@@ -587,6 +600,8 @@ def skill_view(
             result["compatibility"] = frontmatter["compatibility"]
         if isinstance(metadata, dict):
             result["metadata"] = metadata
+        # P0 patch: log successful skill_view loads for dormancy/concentration analysis
+        logger.info("skill_view loaded: %s (%d chars)", skill_name, len(rendered_content))
         return _json(result)
     except Exception as e:
         return tool_error(str(e), success=False)
