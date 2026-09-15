@@ -6,6 +6,12 @@ contents are stored content-addressed (sha256-deduped) under
 ``~/.hermes/.curator_backups/blobs/``. JSONL, not the state DB: durable, greppable,
 survives DB resets. TELEMETRY, NOT A GATE: every public write path swallows and
 logs — except ``rollback_entry``, which FAILS CLOSED when its safety capture fails.
+
+Two entry kinds share this file, told apart by ``action``:
+  • MUTATIONS (create/patch/write_file/delete/…) carry before/after manifests and are
+    rollback targets.
+  • AUDIT ROWS (``refused``) are bookkeeping only — empty before/after, never a
+    rollback target. Read them to see what the curator was BLOCKED from touching.
 """
 
 from __future__ import annotations
@@ -34,6 +40,9 @@ _ARCHIVE_TS_SUFFIX_RE = re.compile(r"^(.+)-\d{14}$")
 # Rollback of these must restore a COMPLETE package: consolidation may have re-homed
 # support files first, so a disk-only capture would restore a hollow skill.
 _PACKAGE_RESTORE_ACTIONS = frozenset({"delete", "archive", "purge"})
+# Audit rows (no before/after manifests). Refused by rollback_entry: rolling one back
+# would "restore" nothing while still writing a safety entry.
+_AUDIT_ONLY_ACTIONS = frozenset({"refused"})
 _VALID_ACTORS = {"curator", "agent", "user"}
 _NON_PACKAGE_TOPS = {".curator_backups", ".hub", ".archive"}
 
@@ -345,6 +354,10 @@ def rollback_entry(entry_id: str) -> Tuple[bool, str]:
     entry = get_entry(entry_id)
     if entry is None:
         return False, f"no ledger entry with id '{entry_id}'"
+    if entry.get("action") in _AUDIT_ONLY_ACTIONS:
+        return False, (f"entry {entry_id} is an audit row ({entry.get('action')} for "
+                       f"'{entry.get('skill', '?')}') — it recorded no mutation, so there is "
+                       f"nothing to roll back.")
     if path_err := _validate_entry_paths(entry):
         return False, f"refusing rollback: {path_err}"
     before = list(entry.get("before") or [])

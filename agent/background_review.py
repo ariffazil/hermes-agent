@@ -1117,6 +1117,10 @@ def _run_review_fork(
         from tools.skill_manager_guards import _reset_background_review_read_marks
 
         _reset_background_review_read_marks()
+    # P1 patch: initialize per-session rejection counter for curator rate-limiting
+    with suppress(Exception):
+        from tools.skill_manager_guards import _background_review_rejection_counts_var
+        _background_review_rejection_counts_var.set({})
     try:
         if review_run is None or review_run.begin_request(st.review_agent):
             # Routed -> digest (cache cold anyway); same model -> full snapshot (warm cache reads).

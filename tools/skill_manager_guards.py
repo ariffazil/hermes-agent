@@ -51,6 +51,35 @@ class _BackgroundReviewReadMarks:
 _background_review_read_paths: "_ctxvars.ContextVar[Optional[_BackgroundReviewReadMarks]]" = (
     _ctxvars.ContextVar("background_review_read_paths", default=None))
 
+# Background-curator refusals leave a trace in the skill ledger (action="refused",
+# actor="curator", empty before/after = audit-only, never a rollback target), so a
+# lesson whose only home is protected is still visible after the review ends.
+#
+# The counter below is PER REVIEW SESSION ONLY: a fresh fork or a gateway restart
+# starts at zero. It exists to break a single session's retry loop, NOT to measure
+# repetition across sessions — read the ledger rows for that. Do not mistake one
+# for the other.
+_CURATOR_MAX_REJECTIONS = 3
+_background_review_rejection_counts_var: "_ctxvars.ContextVar[Optional[Dict[str, int]]]" = (
+    _ctxvars.ContextVar("background_review_rejection_counts", default=None))
+
+
+def _record_refusal(name: str, message: str) -> None:
+    """Append an audit-only ``refused`` row. Best-effort: never raises, never blocks."""
+    with suppress(Exception):
+        from tools import skill_ledger
+        skill_ledger.append_entry("refused", name, actor="curator",
+                                  evidence={"reason": message[:240]})
+
+
+def _guard_refusal(name: str, message: str, **extra: Any) -> Dict[str, Any]:
+    """Return a refusal, count it for the in-session rate limit, and ledger it."""
+    counts = _background_review_rejection_counts_var.get()
+    if counts is not None:
+        counts[name] = counts.get(name, 0) + 1
+    _record_refusal(name, message)
+    return _refusal(message, **extra)
+
 
 def mark_background_review_skill_read(path: Path) -> None:
     """Record that the active background-review fork has read a skill file. The fork must not
@@ -167,16 +196,27 @@ def _background_review_write_guard(
     has no user in the loop, so it is also blocked on pinned/external/bundled/hub skills."""
     if not _is_background_review():
         return None
+    # P1 patch: rate-limit curator retries — after _CURATOR_MAX_REJECTIONS consecutive
+    # refusals for the same skill within one review session, hard-STOP immediately.
+    counts = _background_review_rejection_counts_var.get()
+    if counts is not None:
+        n = counts.get(name, 0)
+        if n >= _CURATOR_MAX_REJECTIONS:
+            return _guard_refusal(name,
+                f"STOP: background curator has been refused {n} times for skill '{name}' "
+                f"in this review session (limit: {_CURATOR_MAX_REJECTIONS}). "
+                f"Auto-deferring. Do NOT retry this skill again this session. "
+                f"Escalate to the user if this skill genuinely needs mutation.")
     refuse = f"Refusing background curator {action} for"
     if _is_pinned(name, "pinned skill guard"):
-        return _refusal(
+        return _guard_refusal(name,
             f"{refuse} pinned skill '{name}': pinned skills "
             f"are off-limits to autonomous maintenance. Ask the user to run `hermes curator "
             f"unpin {name}` if they want it changed.")
     try:
         from agent.skill_utils import is_external_skill_path
         if is_external_skill_path(skill_dir):
-            return _refusal(
+            return _guard_refusal(name,
                 f"{refuse} skill '{name}': the skill lives in skills.external_dirs, which are "
                 f"externally owned and read-only to autonomous curation.")
     except Exception:
@@ -188,7 +228,7 @@ def _background_review_write_guard(
             (skill_usage.is_hub_installed, "hub-installed"),
             (skill_usage.is_bundled, "bundled")):
             if predicate(name):
-                return _refusal(f"{refuse} {label} skill '{name}'.")
+                return _guard_refusal(name, f"{refuse} {label} skill '{name}'.")
         # Not curator-managed (no `created_by: "agent"`) => user-owned. A MISSING
         # record and an explicit `created_by: null` must resolve IDENTICALLY (keying
         # on presence made the policy depend on the guard's own side effect: the
@@ -205,13 +245,13 @@ def _background_review_write_guard(
         if not skill_usage._is_curator_managed_record(usage_rec):
             _detail = (f"created_by={usage_rec.get('created_by')!r}" if isinstance(usage_rec, dict)
                        else "no usage record")
-            return _refusal(
+            return _guard_refusal(name,
                 f"{refuse} skill '{name}': the skill is not "
                 f"curator-managed ({_detail}). User-owned skills are off-limits to autonomous "
                 f"curation. Run `hermes curator adopt {name}` to opt it in.")
     except Exception:
         logger.warning("owned skill guard lookup failed for %s", name, exc_info=True)
-        return _refusal(
+        return _guard_refusal(name,
             f"{refuse} skill '{name}': agent ownership could not "
             f"be verified because the provenance record is unavailable or unreadable.")
     return None
