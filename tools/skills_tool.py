@@ -120,17 +120,56 @@ def check_skills_requirements() -> bool:
     return True  # always available: the directory is created on first use
 
 
+_MATRIX_CACHE: dict = {"sig": None, "map": {}}
+
+
+def _matrix_coordinate_for(skill_name: str) -> Optional[str]:
+    """Coordinate for a skill whose FILE is not in the taxonomy tree.
+
+    Bundled skills stay at the updater's path (one level) because `hermes update` re-seeds them
+    there; moving them creates duplicates the updater keeps undoing. The orthogonal coordinate is
+    therefore a DERIVED VIEW, generated into ``<skills>/.matrix-index.json`` by
+    ``~/.hermes/scripts/skill-matrix.py`` and re-read here (cheap; keyed on file mtime)."""
+    try:
+        from tools.skills_tool import _skills_dir  # self, but keeps monkeypatching honest
+        index_path = _skills_dir() / ".matrix-index.json"
+    except Exception:
+        return None
+    try:
+        sig = index_path.stat().st_mtime_ns
+    except OSError:
+        return None
+    if _MATRIX_CACHE["sig"] != sig:
+        try:
+            import json as _json
+            data = _json.loads(index_path.read_text())
+            _MATRIX_CACHE["map"] = {
+                name: meta.get("coordinate")
+                for name, meta in (data.get("by_name") or {}).items()
+                if isinstance(meta, dict) and meta.get("coordinate")
+            }
+        except Exception:
+            _MATRIX_CACHE["map"] = {}
+        _MATRIX_CACHE["sig"] = sig
+    return _MATRIX_CACHE["map"].get(skill_name)
+
+
 def _get_category_from_path(skill_path: Path) -> Optional[str]:
     """``~/.hermes/skills/mlops/axolotl/SKILL.md`` -> ``"mlops"``; active profile dir first
     (respects test monkeypatching), then skills.external_dirs.
 
-    LOCAL PATCH (arifOS, 2026-09-15): the taxonomy tree is orthogonal and deeper than one
-    level — ``domains/<domain>/<organ>/<capability>/<skill>/SKILL.md``. Reporting only
-    ``parts[0]`` collapsed all 399 skills into the single literal category ``"domains"``,
-    which is less legible than the flat root bucket it replaced. So: for the classic
-    ``category/skill`` layout keep returning ``parts[0]`` unchanged; for anything nested
-    deeper, return the full parent path (skill dir dropped), e.g.
-    ``domains/general/forge/mcp-ops`` — all three axes visible in the listing."""
+    LOCAL PATCH (arifOS, 2026-09-15): this library carries an orthogonal 3-axis taxonomy
+    (``domains/<domain>/<organ>/<capability>/<skill>``). Two layouts coexist because ownership
+    differs: authored skills physically live in the tree, while BUNDLED skills stay at the
+    updater's one-level path (``hermes update`` re-seeds them there). So:
+
+    * nested path (>= 3 parents)  -> the coordinate itself, leaf dropped
+    * classic ``category/skill``  -> ``category`` (unchanged upstream behaviour)
+    * flat / one-level skill      -> look the coordinate up in ``.matrix-index.json``
+      (generated; see ``~/.hermes/scripts/skill-matrix.py``), else ``None`` as before.
+
+    Net effect: exactly one taxonomy is visible to every reader, and it survives updates because
+    it is derived rather than stored."""
     dirs_to_check = [_skills_dir()]
     with suppress(Exception):
         from agent.skill_utils import get_external_skills_dirs
@@ -138,12 +177,17 @@ def _get_category_from_path(skill_path: Path) -> Optional[str]:
     for skills_dir in dirs_to_check:
         with suppress(ValueError):
             parts = skill_path.relative_to(skills_dir).parts
-            if len(parts) < 3:
+            if len(parts) < 2:
                 continue
             parent = parts[:-1]                      # drop the SKILL.md filename
-            if len(parent) == 2:                     # category/skill
+            if parent and parent[0] == "domains":    # physically inside the taxonomy tree
+                return "/".join(parent[:-1]) if len(parent) >= 4 else "/".join(parent)
+            leaf = parent[-1]
+            coord = _matrix_coordinate_for(leaf)     # bundled: file at updater path, coord derived
+            if coord:
+                return coord
+            if len(parent) == 2:                     # classic category/skill, upstream behaviour
                 return parent[0]
-            return "/".join(parent[:-1])             # nested: coordinate path, leaf dropped
     return None
 
 
