@@ -280,6 +280,39 @@ def _platform_enum(platform_name):
         return None, f"Unknown platform: {platform_name}"
 
 
+# ROOT CAUSE (2026-09-17, CARE-BUILD G1): a platform block may declare which env var holds its
+# credential (`telegram: {bot_token_env: ASI_ARIFOS_BOT_TOKEN}`). ``PlatformConfig.from_dict``
+# promotes that non-typed key into ``extra``, but NO code ever read it back: the credential was
+# resolved only from the hardcoded per-platform env name (``gateway.config.PLATFORM_TOKEN_ENV_NAMES``
+# and ``gateway.config_env._ENV_STEPS`` — both ``TELEGRAM_BOT_TOKEN``). Any deployment that injects
+# the token ONLY under the declared name (systemd ``EnvironmentFile=``) therefore reached the sender
+# with ``pconfig.token`` empty, and python-telegram-bot raised
+# "You must pass the token you received from https://t.me/Botfather!".
+# ``hermes send`` was the visible casualty; the gateway itself stayed up only because a systemd
+# drop-in happens to hardcode ``Environment=TELEGRAM_BOT_TOKEN`` — so the lane broke for every
+# standalone caller (CLI, cron, scripts) while the bot kept answering in chat.
+# Fix: honour the declaration, and only when it is actually needed — the hardcoded name still wins
+# whenever it produced a token, so existing installs are untouched.
+def _token_from_declared_env(platform_name, pconfig):
+    """Fill ``pconfig.token`` from the platform's declared ``bot_token_env``; returns ``pconfig``.
+
+    No-op when the token is already resolved (never overrides existing behaviour) or when the
+    platform declares nothing. A declared-but-empty env var logs and falls through to the
+    default resolution so the existing error path still reports the real problem.
+    """
+    declared = str((getattr(pconfig, "extra", None) or {}).get("bot_token_env") or "").strip()
+    if not declared or str(getattr(pconfig, "token", None) or "").strip():
+        return pconfig
+    resolved = str(get_secret(declared, "") or "").strip()
+    if not resolved:
+        logger.warning("platform '%s' declares bot_token_env=%s but it is unset/empty; "
+                       "falling back to the default credential resolution", platform_name, declared)
+        return pconfig
+    pconfig.token = resolved
+    logger.info("platform '%s': token resolved from declared bot_token_env=%s", platform_name, declared)
+    return pconfig
+
+
 def _resolve_platform_config(platform_name, config):
     """``(platform, pconfig, registry_entry, error)``. Plugin platforms must be registered;
     disabled/missing platforms error, except Weixin, which may be configured purely via .env."""
@@ -297,7 +330,7 @@ def _resolve_platform_config(platform_name, config):
     if pconfig is None:
         return None, None, None, (f"Platform '{platform_name}' is not configured. Set up credentials in "
                                   "~/.hermes/config.yaml or environment variables.")
-    return platform, pconfig, entry, None
+    return platform, _token_from_declared_env(platform_name, pconfig), entry, None
 
 
 def _home_chat_id(config, platform, platform_name):
