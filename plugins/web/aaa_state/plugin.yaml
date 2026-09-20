@@ -1,0 +1,9 @@
+name: web-aaa-state
+version: 0.1.0
+description: "AAA State Agent unified web intelligence gateway — routes web_search and web_extract through A-FORGE governed search with evidence tracking, provider routing, and audit receipts."
+author: arifOS
+kind: backend
+provides_web_providers:
+  - aaa-state
+requires_env:
+  - AAA_WEB_GATEWAY_URL
