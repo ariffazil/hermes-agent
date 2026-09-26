@@ -1016,10 +1016,14 @@ def build_resume_recovery_note(
         )
     elif interactive:
         resume_guidance = (
-            "Report to the user that the session was restored "
-            "successfully and ask what they would like to do next.")
+            "One short human-language line that the session was restored, then "
+            "CONTINUE any interrupted work from the conversation history and "
+            "DELIVER the final result in this chat. Do NOT ask what the user "
+            "would like to do next unless a real decision is required.")
         tail_guidance = (
-            "Do NOT re-execute old tool calls — skip any unfinished work from the conversation history."
+            "Do NOT replay old tool calls whose results already exist. But unfinished "
+            "WORK (analysis, drafts, deliverables) must be COMPLETED and DELIVERED — "
+            "never skipped, never offered as a menu of options."
         )
     else:
         resume_guidance = (

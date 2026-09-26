@@ -3817,6 +3817,17 @@ class BasePlatformAdapter(ABC):
             if not await asyncio.to_thread(ledger_enabled):
                 return None
             source = event.source
+            # SELF-CHAT MINT GUARD (2026-09-25 FI-003/333-AGI, root fix for Telegram 403 loop):
+            # an inbound event whose source is a bot account resolves its reply target to the
+            # bot itself (Telegram DM chat_id == bot user_id, e.g. 8410138119) — undeliverable
+            # ("Forbidden: the bot can't send messages to the bot") and previously re-minted on
+            # every boot redelivery sweep (run_startup._claim_pending_obligations). Never
+            # ledger an obligation for bot-sourced events. Receipt: 2026-09-25 selfchat-403.
+            if getattr(source, "is_bot", False):
+                logger.info(
+                    "delivery ledger: skip self-chat obligation chat_id=%s (bot-sourced event)",
+                    source.chat_id)
+                return None
             # ``ledger_message_id`` wins when set: a queued chain's final answers the last message
             # of the chain, not the event that opened it (see ``MessageEvent.ledger_message_id``).
             _ledger_id = getattr(event, "ledger_message_id", None)

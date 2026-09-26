@@ -20,7 +20,7 @@ from agent.turn_recovery import interruptible_backoff_sleep
 
 logger = logging.getLogger("agent.conversation_loop")
 
-_INLINE_THINK_RE = re.compile(r'<think>|<thinking>|<reasoning>', re.IGNORECASE)
+_INLINE_THINK_RE = re.compile(r'<think>|<thinking>|<reasoning>|<mm:think>', re.IGNORECASE)
 
 
 @dataclass

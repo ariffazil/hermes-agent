@@ -19,7 +19,7 @@ __all__ = ["StreamingThinkScrubber", "THINK_TAG_NAMES", "THINK_OPEN_TAGS", "THIN
 # the CLI stream filter, the gateway stream filter, the final-response regex stripper) binds to
 # these; a tag added here is covered everywhere. Consumers match case-insensitively, so the
 # literal tags are lowercase.
-THINK_TAG_NAMES: Tuple[str, ...] = ("think", "thinking", "reasoning", "thought", "REASONING_SCRATCHPAD")
+THINK_TAG_NAMES: Tuple[str, ...] = ("mm:think", "think", "thinking", "reasoning", "thought", "REASONING_SCRATCHPAD")
 THINK_OPEN_TAGS: Tuple[str, ...] = tuple(f"<{name.lower()}>" for name in THINK_TAG_NAMES)
 THINK_CLOSE_TAGS: Tuple[str, ...] = tuple(f"</{name.lower()}>" for name in THINK_TAG_NAMES)
 

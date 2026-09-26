@@ -5816,6 +5816,18 @@ class TelegramAdapter(BasePlatformAdapter):
         """Apply Telegram group trigger rules: DMs unrestricted; group messages pass ``allowed_chats`` (hard gate; only
         the ``guest_mode`` @mention bypass crosses it) and then any of free_response chat/topic, ``require_mention``
         off, reply to the bot, @mention (incl. ``/cmd@botname``), or a wake-word match."""
+        # SELF-ADDRESS DENY (2026-09-25 FI-003/333-AGI — selfchat-403 root fix): events whose
+        # chat IS this bot's own user id are self-referential mirrors (directory-resolved DM
+        # "♍ HERMES🪽" chat_id == bot user id). Processing them forks a duplicate session per
+        # user message and dead-letters every reply (Telegram 403 "bot can't send messages to
+        # the bot"). Drop at the gate — no session, no routing, no ledger, no send.
+        try:
+            _chat_id = str(getattr(getattr(message, "chat", None), "id", "") or "")
+            if _chat_id and _chat_id == str(self._bot.id):
+                logger.info("[Telegram] selfchat deny: dropped event addressed to own chat %s", _chat_id)
+                return False
+        except Exception:
+            logger.debug("selfchat deny check failed", exc_info=True)
         # Learn the live handle BEFORE any mention gate routes on it, then drop our own echoed messages.
         # Filter out the bot's own messages (returned by getUpdates in some environments like
         # groups/supergroups where the bot can see its own messages). Without this, outbound messages are
@@ -6529,6 +6541,18 @@ class TelegramAdapter(BasePlatformAdapter):
             user_name = chat.full_name
         else:
             user_name = chat.title if chat_type == "channel" else None
+
+        # A2A-R Identity Ingress Grounding: Check channel_aliases.json and resolve UNKNOWN
+        try:
+            from gateway.channel_directory import _aliases_path, _load_json_dict
+            _tg_aliases = _load_json_dict(_aliases_path()).get("telegram", {})
+            _uid_key = str(user.id) if user else ""
+            if _uid_key in _tg_aliases:
+                user_name = _tg_aliases[_uid_key]
+            elif not user_name or str(user_name).strip() in {"No name", "None", ""}:
+                user_name = f"UNKNOWN_{_uid_key}" if _uid_key else "UNKNOWN"
+        except Exception:
+            pass
         source = self.build_source(
             chat_id=str(chat.id), chat_name=chat.title or (chat.full_name if has_full_name else None), chat_type=chat_type,
             user_id=(str(user.id) if user else (str(chat.id) if chat_type in {"dm", "channel"} else None)),
