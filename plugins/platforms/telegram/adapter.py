@@ -3810,6 +3810,17 @@ class TelegramAdapter(BasePlatformAdapter):
             retryable=(self._looks_like_connect_timeout(e) or self._looks_like_pool_timeout(e) or not is_timeout),
             error_kind=error_kind)
 
+    def _send_retry_is_final(self, result: SendResult) -> bool:
+        """403-class refusals (Forbidden: bot-to-bot DM without Communication Mode, blocked by
+        user, deactivated, no rights) are structured target refusals — neither the inline retry
+        ladder nor the plain-text fallback can ever fix them. Return as-is; the delivery ledger's
+        dead-target classification (``_DEAD_ERROR_KINDS``) owns finality.
+
+        2026-09-28 telegram-hardening-audit H1 (F13 SAH): boot-sweep redeliveries to bot-DM rooms
+        burned 2 inline retries per permanent refusal (~1/s Forbidden bursts) before the ledger
+        marked the target dead."""
+        return getattr(result, "error_kind", None) == "forbidden"
+
     async def _send_chunks(
         self, chat_id: str, chunks: List[str], delivered: List[str], reply_to: Optional[str],
         metadata: Optional[Dict[str, Any]], error_types: tuple) -> SendResult:
