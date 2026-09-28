@@ -3690,6 +3690,9 @@ class TelegramAdapter(BasePlatformAdapter):
         # than to let violations through silently. Caller may opt out via
         # `metadata={"hermes_mode": "bypass"}` for emergency escape hatch.
         mode_metadata = (metadata or {}).get("hermes_mode")
+        # Length the caller handed in, before anything downstream can rewrite it. On the bypass
+        # path nothing rewrites it, so sent==produced is a true statement, not an assumption.
+        _produced_len: Optional[int] = len(content or "")
         if mode_metadata != "bypass":
             try:
                 from hermes_mcp._send_boundary import apply_mode_shape  # type: ignore
@@ -3745,12 +3748,23 @@ class TelegramAdapter(BasePlatformAdapter):
             if not content or not content.strip():
                 # Mode-shape stripped everything — preserve the same
                 # empty-skip semantics as the pre-boundary path above.
-                return SendResult(success=True, message_id=None)
+                return SendResult(success=True, message_id=None,
+                                  produced_len=_produced_len, sent_len=0)
         # ── END HERMES MODE-SHAPE BOUNDARY ─────────────────────────────────
         # One chat at a time (held only around the API calls, never across the reconnect wait above), so
         # two concurrent split replies to one chat cannot interleave their chunks (#114396).
         async with self._chat_send_lock(chat_id):
-            return await self._send_text_locked(chat_id, content, reply_to, metadata)
+            result = await self._send_text_locked(chat_id, content, reply_to, metadata)
+        # DELIVERY EVIDENCE: what the caller handed in vs what the transport was given after
+        # shaping. Recorded on the result so the delivery ledger can store the difference
+        # instead of asserting 'delivered' for text that never left the process.
+        if _produced_len is not None:
+            try:
+                result.produced_len = _produced_len
+                result.sent_len = len(content or "")
+            except Exception:
+                pass
+        return result
 
     async def _send_text_locked(
         self, chat_id: str, content: str, reply_to: Optional[str], metadata: Optional[Dict[str, Any]]) -> SendResult:

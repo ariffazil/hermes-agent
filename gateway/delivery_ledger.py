@@ -206,6 +206,20 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
     )
     if "adapter_profile" not in {row[1] for row in conn.execute("PRAGMA table_info(delivery_obligations)")}:
         add_column_if_missing(conn, "delivery_obligations", "adapter_profile", "adapter_profile TEXT")
+    # DELIVERY EVIDENCE (2026-09-28, SCAR-2026-09-28-008 follow-through). Until now the ledger
+    # stored `content` = the text the model produced, and flipped state='delivered' with no
+    # evidence at all — while the send boundary downstream trimmed that text. On 2026-09-28
+    # 84.9% of the day's characters were destroyed between those two points (713,924 produced →
+    # 107,868 delivered, 47 replies shipped empty) and every "did it reach the human?" query
+    # returned a confident `delivered`. These three columns make the claim checkable:
+    #   produced_len  characters the agent handed to the send path
+    #   sent_len      characters actually handed to Telegram after the shape boundary
+    #   delivered_receipt_id  the transport's own message id, NULL when no proof exists
+    # NULL means UNKNOWN, never zero — an absent observation is not an observation of absence.
+    for col in ("produced_len INTEGER", "sent_len INTEGER", "delivered_receipt_id TEXT"):
+        name = col.split()[0]
+        if name not in {row[1] for row in conn.execute("PRAGMA table_info(delivery_obligations)")}:
+            add_column_if_missing(conn, "delivery_obligations", name, col)
 
 
 def _transaction():
@@ -340,13 +354,38 @@ def release_runtime_claim(obligation_id: str, error: str = "") -> bool:
     return bool(cursor.rowcount)
 
 
-def _update_state(obligation_id: str, state: str, error: str = "") -> None:
+def _update_state(obligation_id: str, state: str, error: str = "", *, evidence: dict | None = None) -> None:
+    """One atomic UPDATE for the state flip and any delivery evidence.
+
+    Deliberately single-statement: writing `state='delivered'` in one transaction and the
+    receipt in another would leave a window where the row claims delivery with no proof —
+    the exact shape of the defect these columns exist to end."""
+    sets = ["state=?", "updated_at=?", "last_error=?"]
+    args: list = [state, time.time(), error[:500] if error else None]
+    for key in ("produced_len", "sent_len", "delivered_receipt_id"):
+        if evidence is not None and key in evidence:
+            sets.append(f"{key}=?")
+            args.append(evidence[key])
+    args.append(obligation_id)
     with _DB_LOCK, _transaction() as conn:
         conn.execute(
-            """UPDATE delivery_obligations
-               SET state=?, updated_at=?, last_error=?
+            f"""UPDATE delivery_obligations
+               SET {', '.join(sets)}
                WHERE obligation_id=?""",
-            (state, time.time(), error[:500] if error else None, obligation_id))
+            args)
+
+
+def mark_delivered(obligation_id: str, *, produced_len: int | None = None,
+                   sent_len: int | None = None,
+                   delivered_receipt_id: str | None = None) -> None:
+    """Record delivery, carrying whatever evidence the transport actually returned.
+
+    A success with no receipt id still becomes 'delivered' (other platforms' contracts), but the
+    row then says so: delivered_receipt_id IS NULL is a visible gap, not a silent one."""
+    evidence = {k: v for k, v in (
+        ("produced_len", produced_len), ("sent_len", sent_len),
+        ("delivered_receipt_id", delivered_receipt_id)) if v is not None}
+    _update_state(obligation_id, "delivered", evidence=evidence or None)
 
 
 def _claimed_row(oid, session_key, platform, chat_id, thread_id, content, attempts, profile, *,

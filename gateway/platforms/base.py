@@ -1694,6 +1694,12 @@ class SendResult:
     # SEND_ERROR_KINDS member (failures only) via :func:`classify_send_error`, so consumers
     # branch without substring-matching ``error``.
     error_kind: Optional[str] = None
+    # DELIVERY EVIDENCE (2026-09-28): what the send path was handed vs what reached the
+    # transport, after any outbound shaping in between. The delivery ledger used to record only
+    # the produced text and a bare 'delivered', so on 2026-09-28 84.9% of a day's characters
+    # were trimmed after the record was written and nothing could see it.
+    produced_len: Optional[int] = None
+    sent_len: Optional[int] = None
 
 
 # Longest server ``retry_after`` ``_send_with_retry`` will sleep inline. Longer penalties return the
@@ -4242,7 +4248,16 @@ class BasePlatformAdapter(ABC):
             from gateway.dead_targets import classify_dead_error
             from gateway.delivery_ledger import is_reconnect_only, mark_delivered, mark_failed
             if getattr(result, "success", False):
-                await asyncio.to_thread(mark_delivered, obligation_id)
+                # Carry the evidence the transport actually produced. `message_id` is the only
+                # real proof a human received something; produced_len/sent_len expose any
+                # trimming that happened between this row and the wire. Absent values stay
+                # NULL — unknown, not zero.
+                await asyncio.to_thread(
+                    mark_delivered, obligation_id,
+                    produced_len=getattr(result, "produced_len", None),
+                    sent_len=getattr(result, "sent_len", None),
+                    delivered_receipt_id=(str(getattr(result, "message_id", "") or "") or None),
+                )
                 return
             error = str(getattr(result, "error", "") or "")
             await asyncio.to_thread(mark_failed, obligation_id, error)
