@@ -19,6 +19,16 @@ import pytest
 from gateway.config import Platform, PlatformConfig
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_env(monkeypatch):
+    """Scoped env outranks ``config.extra`` in ``_extra_or_secret``, so an operator whose shell
+    exports federation allowlists (a sourced login on KVM8 does) made ``test_list_form`` read
+    31 real chat ids instead of its own fixture. The product is correct; the test was not
+    hermetic. Deleting the vars here makes the assertion mean what it says on any machine."""
+    for var in ("TELEGRAM_ALLOWED_CHATS", "TELEGRAM_GROUP_ALLOWED_CHATS"):
+        monkeypatch.delenv(var, raising=False)
+
+
 # ---------------------------------------------------------------------------
 # Telegram
 # ---------------------------------------------------------------------------
