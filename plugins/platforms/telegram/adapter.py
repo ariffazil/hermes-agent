@@ -6257,9 +6257,13 @@ class TelegramAdapter(BasePlatformAdapter):
         if event.message_type == MessageType.COMMAND:
             # Commands keep the original source (user_id) so _check_slash_access can identify the sender.
             return dataclasses.replace(event, channel_prompt=channel_prompt)
+        # Triggered turns keep sender identity (user_id/user_name) so lane resolution,
+        # sender attribution, and per-sender agent caching see the real speaker — the
+        # same precedent as COMMAND events above (#67816). Only observed-history rows
+        # (_observe_unmentioned_group_message) use the shared identity-less source.
         return dataclasses.replace(
             event, text=self._telegram_group_observe_attributed_text(event),
-            source=self._telegram_group_observe_shared_source(event.source), channel_prompt=channel_prompt)
+            channel_prompt=channel_prompt)
 
     def _media_message_type(self, msg: Message) -> MessageType:
         """Classify a Telegram media message into a MessageType (first present attachment wins)."""
