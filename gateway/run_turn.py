@@ -2136,17 +2136,23 @@ class GatewayTurnMixin:
         try:
             import sys as _sys
             _HERMES_MCP_PARENT = "/root/.hermes"
-            if _HERMES_MCP_PARENT not in _sys.path:
-                _sys.path.insert(0, _HERMES_MCP_PARENT)
-            from hermes_mcp._conversation_mode import classify_mode
-            _verdict = classify_mode(
-                message_text or "",
-                metadata={
-                    "platform": getattr(source, "platform", None) and source.platform.value,
-                    "lane": getattr(source, "lane", None),
-                    "profile": getattr(source, "profile", None),
-                },
-            )
+            # Direct file load — bypasses the hermes_mcp package __init__, which
+            # imports the MCP server chain (fastmcp) and is absent from BOTH gateway
+            # runtimes' dependency sets. _conversation_mode itself is stdlib-pure.
+            _classify_mod = _sys.modules.get("_hermes_conversation_mode")
+            if _classify_mod is None:
+                import importlib.util as _ilu
+                _spec = _ilu.spec_from_file_location(
+                    "_hermes_conversation_mode",
+                    _HERMES_MCP_PARENT + "/hermes_mcp/_conversation_mode.py",
+                )
+                _classify_mod = _ilu.module_from_spec(_spec)
+                # Register BEFORE exec: the module's dataclasses resolve
+                # sys.modules[cls.__module__] at class-definition time.
+                _sys.modules["_hermes_conversation_mode"] = _classify_mod
+                _spec.loader.exec_module(_classify_mod)
+            classify_mode = _classify_mod.classify_mode
+            _verdict = classify_mode(message_text or "")
             # classify_mode returns ModeVerdict dataclass; extract mode string.
             _mode_str = getattr(_verdict, "mode", None) or str(_verdict)
             source = dataclasses.replace(source, mode=_mode_str)
