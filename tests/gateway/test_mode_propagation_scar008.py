@@ -166,36 +166,64 @@ def test_analyst_mode_preserves_a_12_row_enumeration():
     assert v.original_len == len(ENUMERATION)
 
 
-def test_light_mode_provably_destroys_the_same_enumeration():
-    """Documents the arithmetic — this assertion is the reason DEFAULT_MODE must not stay 'light'."""
+def test_length_caps_are_advisory_not_jails():
+    """F13 order 2026-09-28 (~22:26 MYT): no character/length limit may silently delete substance.
+
+    This replaces the earlier assertion that `light` provably destroyed a 12-row table —
+    that destruction was the defect (84.9% of the day's chars lost, 47 empty replies), not
+    a feature to pin. The cap is still measured: it must appear in the verdict as a WAIVED
+    telemetry event, so the witness that found this bug keeps working.
+    """
     b = _load_boundary()
     v = b.apply_mode_shape("light", ENUMERATION)
     assert not isinstance(v, tuple)
-    rows = [ln for ln in v.shaped_text.splitlines() if ln.startswith("| ") and "Model-" in ln]
-    assert len(rows) < 12, (
-        "light cap now preserves a 12-row table — the guard that forced light=240 for "
-        "decoder/ABCD leaks needs revisiting, and this file must be updated deliberately"
+    rows = [ln for ln in v.shaped_text.splitlines() if "Model-" in ln]
+    assert len(rows) == 12, f"light still clipped the enumeration: {len(rows)}/12 rows survived"
+    assert any(x.startswith("length_cap_waived") for x in v.violations), (
+        f"cap waiver not recorded — telemetry lost: {v.violations}"
     )
 
 
-@_known_open
-def test_none_mode_is_not_silently_the_tightest_cap():
-    """The open defect, pinned so it stays unmissable without blocking a restart.
+def test_jargon_stripping_survives_the_cap_removal():
+    """What the caps were FOR. Substance flows; internal machinery still does not reach the human."""
+    b = _load_boundary()
+    draft = (
+        "⚒️ REALITY > EVERYTHING · DITEMPA BUKAN DIBERI\n\n"
+        "## 🪞 DECODE:\nAku tak pasti jam berapa.\n\n"
+        "Option A: jalan\nOption B: tahan\nOption C: tunggu\nOption D: bubar\n"
+    )
+    v = b.apply_mode_shape("light", draft)
+    assert not isinstance(v, tuple)
+    assert "REALITY > EVERYTHING" not in v.shaped_text, "boot signature leaked to the human"
+    assert "DECODE" not in v.shaped_text, "decoder header leaked to the human"
+    assert "Option A" not in v.shaped_text, "ABCD menu leaked to the human"
+    assert "Aku tak pasti jam berapa" in v.shaped_text, "the actual sentence was deleted too"
 
-    mode=None → DEFAULT_MODE → light. An absent verdict is punished with the *tightest*
-    cap instead of a visible hold. This is the follow-through to fix #1: once callers
-    reliably deliver a verdict (SCAR-2026-09-28-008), the fail-safe should HOLD/announce
-    rather than silently clip.
+
+def test_never_ship_an_empty_reply():
+    """47 replies shipped empty on 2026-09-28: stripping consumed the whole message."""
+    b = _load_boundary()
+    v = b.apply_mode_shape("light", "## ⚠️ Reality check\n")
+    assert not isinstance(v, tuple)
+    assert v.shaped_text.strip() or not v.original_len, (
+        "stripping produced an empty outbound reply — silence is the worse failure"
+    )
+
+
+def test_none_mode_is_not_silently_the_tightest_cap():
+    """An absent verdict must not buy a substance deletion.
+
+    Before SCAR-2026-09-28-008: mode=None → DEFAULT_MODE='light' → 240 chars, i.e. the
+    *absence* of a classifier answer was punished with the tightest cap in the system.
+    Length caps are now advisory, so no mode can delete substance; stripping posture may
+    still be the conservative one, which is the correct reading of 'unknown'.
     """
     b = _load_boundary()
     v = b.apply_mode_shape(None, ENUMERATION)
     assert not isinstance(v, tuple)
     rows = [ln for ln in v.shaped_text.splitlines() if "Model-" in ln]
-    if len(rows) == 12:
-        return  # fixed: unknown no longer means "clamp hardest"
-    raise AssertionError(
-        f"unknown mode silently applied light cap ({len(rows)}/12 rows survived) — "
-        "fail-safe should HOLD or announce, not truncate (SCAR-2026-09-28-008 follow-through)"
+    assert len(rows) == 12, (
+        f"unknown mode still clipped ({len(rows)}/12 rows) — fail-safe must not truncate"
     )
 
 
