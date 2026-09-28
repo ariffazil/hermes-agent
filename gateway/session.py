@@ -85,6 +85,11 @@ class SessionSource:
     role_authorized: bool = False  # adapter granted access via role, not user ID
     # Multiplex profile this message routes to (None => active/default); namespaces the key.
     profile: Optional[str] = None
+    # Sovereign overlay SCAR-2026-09-28-005 (Patch C): per-turn conversation posture
+    # classified in run_turn; read by the Telegram adapter boundary (Patch B+) to shape
+    # replies. Transport-local — deliberately NOT in the to_dict/from_dict whitelists,
+    # so a peer cannot forge its own mode across sessions.
+    mode: Optional[str] = None
     # Transport-local fail-closed signal: explicit profile route whose target is not served.
     profile_route_rejected: bool = field(default=False, repr=False, compare=False)
     # Discord auto-thread metadata: explicit so pre-existing/renamed threads are never renamed.
