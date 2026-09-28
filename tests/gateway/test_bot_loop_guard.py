@@ -313,6 +313,13 @@ def test_drop_is_placed_after_the_budget_charge():
         "the drop must come after the metering charge and before the turn is handed on — "
         "moving it earlier silently rewrites what this file's tests assert"
     )
+    # The busy/steered follow-up path bypasses _hm_admit_event entirely, so it needs its own
+    # chokepoint. Without this assertion the second path silently regresses to burning turns.
+    busy = pathlib.Path("gateway/run_busy.py").read_text()
+    body2 = busy[busy.index("_bot_loop_admitted = True"):]
+    assert "_bot_dm_undeliverable" in body2[:600], (
+        "run_busy follow-up path lost its undeliverable drop"
+    )
 
 
 @pytest.mark.asyncio

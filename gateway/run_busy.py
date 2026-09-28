@@ -805,6 +805,10 @@ class GatewayBusySessionMixin:
         if not self._admit_bot_message_for_source(event.source):
             return True
         event._bot_loop_admitted = True
+        # Same placement rule as _hm_admit_event: charge the budget first, then refuse a turn whose
+        # reply the transport can never deliver. This path is what the inbound drop cannot cover.
+        if self._bot_dm_undeliverable(event.source):
+            return True
 
         effective_mode = self._effective_busy_input_mode(event.source)
         if self._draining:  # gateway restarting/stopping
