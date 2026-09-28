@@ -2045,7 +2045,16 @@ class GatewayTurnMixin:
 
     @dataclasses.dataclass
     class _PreparedTurn:
-        """Inputs to the agent run assembled by ``_hmwa_prepare_turn``."""
+        """Inputs to the agent run assembled by ``_hmwa_prepare_turn``.
+
+        ``source`` carries the turn's SessionSource *after* Patch C has stamped the
+        classifier verdict onto it. Without this field the rebind done inside
+        ``_hmwa_prepare_turn`` (``source = dataclasses.replace(source, mode=...)``)
+        dies with the helper's local, the caller's source stays mode-less, and
+        ``_thread_metadata_for_source`` never sets ``hermes_mode`` — so the Telegram
+        boundary falls back to DEFAULT_MODE="light" (240 chars) for every reply.
+        SCAR-2026-09-28-008.
+        """
 
         history: Any
         context_prompt: str
@@ -2055,6 +2064,7 @@ class GatewayTurnMixin:
         persist_user_display_kind: Optional[str]
         persistence_session_id: Optional[str] = None
         persistence_owner: Optional[str] = None
+        source: Any = None
 
     async def _hmwa_prepare_turn(self, event, source, session_entry, session_key, _quick_key, run_generation):
         """Everything between session resolution and the agent run: session open, task-local env,
@@ -2196,7 +2206,7 @@ class GatewayTurnMixin:
                  if event.message_id else str(uuid.uuid4()))
         return self._PreparedTurn(
             history, context_prompt, message_text, persist_user_message, persist_user_timestamp,
-            persist_user_display_kind, session_entry.session_id, owner,
+            persist_user_display_kind, session_entry.session_id, owner, source=source,
         ), _session_env_tokens
 
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
@@ -2220,6 +2230,15 @@ class GatewayTurnMixin:
         )
         if not isinstance(prepared, self._PreparedTurn):
             return prepared
+        # SCAR-2026-09-28-008 — adopt the source the helper stamped with the classifier
+        # verdict. Patch C (SCAR-2026-09-28-005) did `source = dataclasses.replace(source,
+        # mode=_mode_str)` on the helper's LOCAL binding; `_PreparedTurn` carried no
+        # `source`, so the verdict died there. Consequence: `_thread_metadata_for_source`
+        # saw mode=None → `hermes_mode` never entered send metadata → the Telegram boundary
+        # normalised every reply to DEFAULT_MODE="light" (240 chars), destroying ~85-95% of
+        # outbound substance while state.db still recorded the full text as `delivered`.
+        if prepared.source is not None:
+            source = prepared.source
         history, message_text = prepared.history, prepared.message_text
 
         try:
