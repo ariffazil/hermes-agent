@@ -272,3 +272,63 @@ def test_load_settings_reads_config_yaml(monkeypatch):
 
     monkeypatch.setattr(hermes_config, "load_config_readonly", boom)
     assert load_settings() == BotLoopGuardSettings()
+
+
+# --- undeliverable-transport drop (2026-09-28: the bot→bot DM burn) ---------------
+# Telegram cannot deliver a bot's DM reply to another bot: 48 obligations burned against the
+# bot's own user id (largest 8,780 chars) and 88 send failures in 90 minutes, while the guard's
+# default budget (20 events / 300 s) never trips at ~12/hour. The budget was never the lever —
+# deliverability is a property of the transport. The drop sits AFTER the metering charge, so the
+# contract this file asserts above still describes reality.
+
+from gateway.authz_mixin import GatewayAuthorizationMixin  # noqa: E402
+
+
+def _dm_bot(user=BOT_A, chat="424242", chat_type="dm", is_bot=True, platform=Platform.TELEGRAM):
+    return SessionSource(platform=platform, chat_id=chat, user_id=user,
+                         chat_type=chat_type, is_bot=is_bot)
+
+
+def test_undeliverable_predicate_covers_only_the_broken_shape():
+    gw = object.__new__(GatewayAuthorizationMixin)
+    assert gw._bot_dm_undeliverable(_dm_bot()) is True
+    assert gw._bot_dm_undeliverable(_dm_bot(chat_type="group")) is False, (
+        "bot-to-bot does reach groups — the A2A lanes depend on it"
+    )
+    assert gw._bot_dm_undeliverable(_dm_bot(is_bot=False)) is False, "never block a human"
+    assert gw._bot_dm_undeliverable(_dm_bot(platform=SimpleNamespace(value="slack"))) is False, (
+        "a Telegram transport fact, not a global bot policy"
+    )
+
+
+def test_drop_is_placed_after_the_budget_charge():
+    import pathlib
+
+    src = pathlib.Path("gateway/run_inbound.py").read_text()
+    body = src[src.index("async def _hm_admit_event("):]
+    charge = body.index("_admit_bot_message_for_source")
+    drop = body.index("_bot_dm_undeliverable")
+    handed_on = body.index("return event, source, False")
+    assert charge < drop < handed_on, (
+        "the drop must come after the metering charge and before the turn is handed on — "
+        "moving it earlier silently rewrites what this file's tests assert"
+    )
+
+
+@pytest.mark.asyncio
+async def test_group_bot_still_reaches_admission(monkeypatch, runner, clock):
+    """Guard against a future 'fix' that blocks bots wholesale and kills the A2A group lanes.
+
+    Awaited on purpose: ``_hm_admit_event`` is a coroutine, and an un-awaited call object is
+    'not None' no matter what the gates decide — a test that passes by forgetting to await is
+    the same species of fake green this whole change is about."""
+    from gateway.platforms.base import MessageEvent
+
+    _incident_config(monkeypatch)
+    got = await runner._hm_admit_event(
+        MessageEvent(text="ping", message_id="1", source=_bot(BOT_A, GROUP_CHAT, "group")))
+    assert got is not None, "a bot in an allowed group must still be admitted"
+
+    dropped = await runner._hm_admit_event(
+        MessageEvent(text="ping", message_id="2", source=_dm_bot()))
+    assert dropped is None, "a bot DM that the transport can never answer must not buy a turn"

@@ -611,6 +611,34 @@ class GatewayAuthorizationMixin:
             )
         return allowed
 
+    def _bot_dm_undeliverable(self, source: SessionSource) -> bool:
+        """True when a reply to this sender can never be delivered by the transport itself.
+
+        Telegram forbids a bot DMing another bot — the API answers "Forbidden: the bot can't
+        send messages to the bot" *after* the turn has been generated and paid for. Measured on
+        KVM8 2026-09-28: 48 delivery obligations burned against the bot's own user id (largest
+        8,780 chars), and 88 such send failures in one 90-minute window. The loop guard cannot
+        help here: its default budget (20 events / 300 s) never trips at ~12 an hour, so the
+        budget is not the lever — deliverability is a property of the transport.
+
+        Called after the bot-loop budget is charged, so metering semantics are unchanged:
+        the message is still counted, it just no longer buys a generation. Groups are not
+        touched — bot-to-bot traffic does reach a group, and the A2A lanes depend on it.
+        """
+        if not getattr(source, "is_bot", False):
+            return False
+        platform = getattr(getattr(source, "platform", None), "value", None)
+        if str(platform or "").lower() != "telegram":
+            return False
+        if str(getattr(source, "chat_type", "") or "").lower() != "dm":
+            return False
+        logger.info(
+            "Dropping bot-authored Telegram DM before generation: chat=%s sender=%s (%s) — "
+            "the transport cannot deliver a bot's reply to a bot, so a turn here is pure cost",
+            source.chat_id, source.user_id, source.user_name or "unnamed",
+        )
+        return True
+
     def _is_user_authorized(self, source: SessionSource, *, allow_adapter_delegation: bool = True) -> bool:
         """Whether a user may use the bot.
 

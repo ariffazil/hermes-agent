@@ -252,6 +252,12 @@ class GatewayInboundMixin:
         # The busy path charged this event on arrival; a drained follow-up must not pay twice.
         if not getattr(event, "_bot_loop_admitted", False) and not self._admit_bot_message_for_source(source):
             return None
+        # Undeliverable-transport drop, deliberately placed AFTER the budget charge above: the
+        # message is still metered exactly as the bot-loop contract tests assert, but it no
+        # longer buys a generation whose reply the transport is obliged to reject (Telegram
+        # forbids bot→bot DM). Groups fall through untouched — A2A lanes deliver there.
+        if self._bot_dm_undeliverable(source):
+            return None
         return event, source, False
 
     def _hm_estop_turn_allowed(self, event: "MessageEvent", source: SessionSource) -> bool:
