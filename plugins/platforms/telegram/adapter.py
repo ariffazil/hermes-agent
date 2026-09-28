@@ -3711,7 +3711,11 @@ class TelegramAdapter(BasePlatformAdapter):
                         error=f"mode_shape_import_failed: {exc}",
                         retryable=False,
                     )
-            verdict = apply_mode_shape(mode_metadata, content)
+            # SCAR-2026-09-28-006 follow-through: the lane was resolved upstream
+            # (platforms/base.py:_thread_metadata_for_source → hermes_lane) but was never
+            # handed to the boundary, so _lane_should_clamp(None) always returned False and
+            # the room-aware ceiling F13 ratified on 2026-09-28 could not fire for ANY chat.
+            verdict = apply_mode_shape(mode_metadata, content, (metadata or {}).get("hermes_lane"))
             if isinstance(verdict, tuple) and verdict[0] == "IMPORT_FAILED":
                 logger.error(
                     "[%s] _send_boundary reports import failure (%s) — "

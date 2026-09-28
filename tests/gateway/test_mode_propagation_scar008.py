@@ -227,6 +227,38 @@ def test_none_mode_is_not_silently_the_tightest_cap():
     )
 
 
+ADAPTER = REPO / "plugins" / "platforms" / "telegram" / "adapter.py"
+AUTHZ = REPO / "gateway" / "authz_mixin.py"
+
+
+def test_boundary_call_site_passes_lane():
+    """SCAR-2026-09-28-006 was dead for 5 hours: F13 ratified a room-aware ceiling, but the
+    call site passed only (mode, content), so `_lane_should_clamp(None)` never matched.
+    AST-checked (3 args) rather than grepped, so reformatting cannot hide a regression."""
+    tree = ast.parse(ADAPTER.read_text(encoding="utf-8"), filename=str(ADAPTER))
+    calls = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+        and (getattr(n.func, "id", None) or getattr(n.func, "attr", None)) == "apply_mode_shape"
+    ]
+    assert calls, "no apply_mode_shape() call found in the Telegram adapter"
+    for c in calls:
+        assert len(c.args) >= 3 or any(k.arg == "lane" for k in c.keywords), (
+            f"apply_mode_shape at line {c.lineno} does not pass a lane — SCAR-006 unreachable"
+        )
+
+
+class _Skipped(Exception):
+    """Engine deps (ruamel et al) are absent from the gateway's standalone runtime."""
+
+# NOTE: an earlier version of this file refused bot-authored DMs before generation. It broke
+# tests/gateway/test_bot_loop_guard.py::test_admitted_bot_traffic_is_cut_at_the_budget, which
+# asserts bot DMs ARE admitted and metered by budget — a deliberate design, not an oversight.
+# The undeliverable-reply waste (34 Forbidden sends / 3h, 55,676 chars abandoned) is therefore
+# a bot_loop_guard BUDGET question (KVM8 config.yaml carries no `gateway.bot_loop_guard` block
+# at all, so the guard runs on defaults), not an authorization question. That test is the pin.
+
+
 if __name__ == "__main__":
     import traceback
 
@@ -236,11 +268,14 @@ if __name__ == "__main__":
         return any("xfail" in repr(getattr(m, "name", m)) for m in getattr(fn, "pytestmark", []))
 
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
-    failed = warned = 0
+    failed = warned = skipped = 0
     for name, fn in tests:
         try:
             fn()
             print(f"  PASS  {name}")
+        except _Skipped as exc:
+            skipped += 1
+            print(f"  SKIP  {name}: {exc}")
         except AssertionError as exc:
             if _is_known_open(fn):
                 warned += 1
@@ -252,5 +287,5 @@ if __name__ == "__main__":
             failed += 1
             print(f"  ERROR {name}:\n{traceback.format_exc()}")
     status = "ALL-GREEN" if failed == 0 else f"{failed} FAILED — DO NOT RESTART"
-    print(f"{status} (mode propagation, SCAR-2026-09-28-008) · {warned} known-open WARN")
+    print(f"{status} (mode propagation, SCAR-2026-09-28-008) · {warned} known-open WARN · {skipped} SKIP")
     sys.exit(1 if failed else 0)
