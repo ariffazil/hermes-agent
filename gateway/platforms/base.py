@@ -137,6 +137,47 @@ def _thread_metadata_for_source(source, reply_to_message_id: str | None = None) 
     profile = str(getattr(source, "profile", None) or "").strip()
     if profile:
         metadata["hermes_profile"] = profile
+    # B+ (NEW — SCAR-2026-09-28-005): propagate runtime mode for outbound
+    # shape enforcement at the Telegram adapter boundary.
+    # Without this, mode_metadata in adapter.send() is None and the
+    # boundary falls back to DEFAULT_MODE ("light", 240 chars) which
+    # over-trims legitimate analyst/coach replies.
+    mode = getattr(source, "mode", None)
+    if mode:
+        metadata["hermes_mode"] = str(mode)
+    # B+ (NEW — SCAR-2026-09-28-006): propagate lane/room identity so the
+    # adapter-boundary LANE_CEILING in _send_boundary can clamp shape by
+    # room geometry (e.g., shared group → light regardless of classifier
+    # verdict). Without this, lane_metadata in adapter.send() is None and
+    # the boundary cannot apply room-aware ceiling — classifier returns
+    # "analyst" on technical banter in SADO group, boundary passes through
+    # 1800-char cap, decoder/ABCD leaks. Resolve lane from lanes.yaml via
+    # the same precedence the lane_switch plugin uses: Pass 1 = exact
+    # (user+chat) match, Pass 2 = user-only fallback. Falls back silently
+    # to None if lanes.yaml is absent — caller still works, just no ceiling.
+    if not metadata.get("hermes_lane"):
+        try:
+            from gateway.platforms._lane_resolver import resolve_lane_id  # type: ignore
+            user_id = getattr(source, "user_id", None)
+            chat_id = getattr(source, "chat_id", None)
+            resolved_lane = resolve_lane_id(
+                user_id=str(user_id or ""), chat_id=str(chat_id or "")
+            )
+            if resolved_lane:
+                metadata["hermes_lane"] = resolved_lane
+        except Exception:
+            # Optional path: never break the send path if lane resolution
+            # is unavailable. LANE_CEILING simply won't fire this turn.
+            pass
+    # SCAR-2026-09-28-007: propagate chat_type geometry. When chat_type is
+    # group/channel/thread, the message is going to a SHARED ROOM — even
+    # if lane resolution fails (lanes.yaml missing, resolver import error),
+    # chat_type alone is strong signal for group geometry. The boundary
+    # uses this as a second-floor safety net so analyzer-style content
+    # cannot leak into shared rooms via lane-resolution failure.
+    chat_type = getattr(source, "chat_type", None)
+    if chat_type and chat_type != "dm":
+        metadata["hermes_chat_type"] = str(chat_type)
     return metadata
 
 

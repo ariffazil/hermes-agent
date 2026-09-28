@@ -4187,6 +4187,14 @@ class GatewayRunner(
         if profile and metadata is not None:
             metadata = dict(metadata)
             metadata["hermes_profile"] = profile
+        # Patch B+ (SCAR-2026-09-28-005) — propagate runtime mode for outbound
+        # shape enforcement at the Telegram adapter boundary. Without this,
+        # mode_metadata in adapter.send() is None and boundary falls back to
+        # DEFAULT_MODE ("light", 240 chars), over-trimming analyst/coach replies.
+        mode = getattr(source, "mode", None)
+        if mode and metadata is not None:
+            metadata = dict(metadata)
+            metadata["hermes_mode"] = str(mode)
         return metadata
 
     def _thread_metadata_for_target(

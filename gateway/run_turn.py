@@ -2124,6 +2124,47 @@ class GatewayTurnMixin:
         if message_text is None:
             return None, _session_env_tokens
 
+        # Patch C — SCAR-2026-09-28-005: classify conversation mode and propagate
+        # to source.mode so the Telegram adapter boundary (Patch B in
+        # platforms/base.py:_thread_metadata_for_source) can apply correct shape cap.
+        # F1 Amanah: try/except — if classify_mode() raises or hangs, fail-safe
+        # to "light" (240 chars), never crash the gateway main loop.
+        try:
+            import sys as _sys
+            _HERMES_MCP_PARENT = "/root/.hermes"
+            if _HERMES_MCP_PARENT not in _sys.path:
+                _sys.path.insert(0, _HERMES_MCP_PARENT)
+            from hermes_mcp._conversation_mode import classify_mode
+            _verdict = classify_mode(
+                message_text or "",
+                metadata={
+                    "platform": getattr(source, "platform", None) and source.platform.value,
+                    "lane": getattr(source, "lane", None),
+                    "profile": getattr(source, "profile", None),
+                },
+            )
+            # classify_mode returns ModeVerdict dataclass; extract mode string.
+            _mode_str = getattr(_verdict, "mode", None) or str(_verdict)
+            source = dataclasses.replace(source, mode=_mode_str)
+            with suppress(Exception):
+                event.source = source
+        except Exception as _mode_err:
+            logger.warning(
+                "Patch C (SCAR-2026-09-28-005): classify_mode failed: %s — "
+                "fail-safe to mode='light' (240 chars)",
+                _mode_err,
+            )
+            try:
+                source = dataclasses.replace(source, mode="light")
+                with suppress(Exception):
+                    event.source = source
+            except Exception as _fallback_err:
+                logger.error(
+                    "Patch C fallback also failed: %s — boundary will use "
+                    "DEFAULT_MODE='light'",
+                    _fallback_err,
+                )
+
         message_text, persist_user_message, persist_user_timestamp = (
             self._hmwa_apply_message_timestamp(event, message_text)
         )

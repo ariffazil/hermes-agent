@@ -3681,6 +3681,68 @@ class TelegramAdapter(BasePlatformAdapter):
         # Skip whitespace-only text to prevent Telegram 400 empty-text errors.
         if not content or not content.strip():
             return SendResult(success=True, message_id=None)
+        # ── HERMES MODE-SHAPE BOUNDARY — SCAR-2026-09-28-001 ────────────────
+        # Every outbound message goes through enforce_mode_shape() before the
+        # chat lock / rich fast-path / MarkdownV2 chunker see it. The enforcer
+        # trims ABCD menus, decoder headers, closing rituals, boot sigs, and
+        # caps length per mode. If the hermes_mcp import fails (F2 TRUTH
+        # lie), we REFUSE to send raw content — better to surface the gap
+        # than to let violations through silently. Caller may opt out via
+        # `metadata={"hermes_mode": "bypass"}` for emergency escape hatch.
+        mode_metadata = (metadata or {}).get("hermes_mode")
+        if mode_metadata != "bypass":
+            try:
+                from hermes_mcp._send_boundary import apply_mode_shape  # type: ignore
+            except ImportError:
+                # Fall back to /root/.hermes/hermes_mcp on sys.path
+                _hermes_mcp_dir = "/root/.hermes/hermes_mcp"
+                if _hermes_mcp_dir not in sys.path:
+                    sys.path.insert(0, _hermes_mcp_dir)
+                try:
+                    from _send_boundary import apply_mode_shape  # type: ignore
+                except ImportError as exc:
+                    logger.error(
+                        "[%s] hermes_mcp._send_boundary import failed (%s) — "
+                        "REFUSING to send raw content. Caller must investigate.",
+                        self.name, exc,
+                    )
+                    return SendResult(
+                        success=False,
+                        error=f"mode_shape_import_failed: {exc}",
+                        retryable=False,
+                    )
+            verdict = apply_mode_shape(mode_metadata, content)
+            if isinstance(verdict, tuple) and verdict[0] == "IMPORT_FAILED":
+                logger.error(
+                    "[%s] _send_boundary reports import failure (%s) — "
+                    "REFUSING to send raw content.",
+                    self.name, verdict[1],
+                )
+                return SendResult(
+                    success=False,
+                    error=f"mode_shape_import_failed: {verdict[1]}",
+                    retryable=False,
+                )
+            # Type narrow: after the IMPORT_FAILED tuple-check, `verdict` is
+            # a ShapeVerdict. Cast for pyright + sanity-check at runtime.
+            assert not isinstance(verdict, tuple), (
+                "apply_mode_shape returned non-tuple but not a ShapeVerdict: "
+                f"{type(verdict).__name__}"
+            )
+            # verdict is a ShapeVerdict — replace content for downstream.
+            if verdict.trimmed:
+                logger.info(
+                    "[%s] mode_shape trimmed outbound to chat %s: "
+                    "%d→%dc, violations=%s",
+                    self.name, chat_id, verdict.original_len,
+                    len(verdict.shaped_text), list(verdict.violations),
+                )
+            content = verdict.shaped_text
+            if not content or not content.strip():
+                # Mode-shape stripped everything — preserve the same
+                # empty-skip semantics as the pre-boundary path above.
+                return SendResult(success=True, message_id=None)
+        # ── END HERMES MODE-SHAPE BOUNDARY ─────────────────────────────────
         # One chat at a time (held only around the API calls, never across the reconnect wait above), so
         # two concurrent split replies to one chat cannot interleave their chunks (#114396).
         async with self._chat_send_lock(chat_id):
@@ -4380,9 +4442,6 @@ class TelegramAdapter(BasePlatformAdapter):
         if not state:
             await query.answer(text="Picker expired — run the command again.")
             return
-        # Same auth gate as approval buttons: strangers in a shared group must not flip session state.
-        if not await self._callback_authorized(query, self._callback_ctx(query), _UNAUTHORIZED):
-            return
         try:
             choice = state["choices"][int(data[3:])]
         except (ValueError, IndexError):
@@ -4717,7 +4776,8 @@ class TelegramAdapter(BasePlatformAdapter):
             (("cp:",), self._handle_choice_picker_callback)):
             if data.startswith(prefixes):
                 chat_id = str(query.message.chat_id) if query.message else None
-                if chat_id:
+                # One auth gate for every chat-id picker: strangers in a shared group must not drive the owner's picker.
+                if chat_id and await self._callback_authorized(query, cb, _UNAUTHORIZED):
                     await handler(query, data, chat_id)
                 return
         for prefix, handler in (
@@ -6360,18 +6420,6 @@ class TelegramAdapter(BasePlatformAdapter):
         """Apply Telegram group trigger rules: DMs unrestricted; group messages pass ``allowed_chats`` (hard gate; only
         the ``guest_mode`` @mention bypass crosses it) and then any of free_response chat/topic, ``require_mention``
         off, reply to the bot, @mention (incl. ``/cmd@botname``), or a wake-word match."""
-        # SELF-ADDRESS DENY (2026-09-25 FI-003/333-AGI — selfchat-403 root fix): events whose
-        # chat IS this bot's own user id are self-referential mirrors (directory-resolved DM
-        # "♍ HERMES🪽" chat_id == bot user id). Processing them forks a duplicate session per
-        # user message and dead-letters every reply (Telegram 403 "bot can't send messages to
-        # the bot"). Drop at the gate — no session, no routing, no ledger, no send.
-        try:
-            _chat_id = str(getattr(getattr(message, "chat", None), "id", "") or "")
-            if _chat_id and _chat_id == str(self._bot.id):
-                logger.info("[Telegram] selfchat deny: dropped event addressed to own chat %s", _chat_id)
-                return False
-        except Exception:
-            logger.debug("selfchat deny check failed", exc_info=True)
         # Learn the live handle BEFORE any mention gate routes on it, then drop our own echoed messages.
         # Filter out the bot's own messages (returned by getUpdates in some environments like
         # groups/supergroups where the bot can see its own messages). Without this, outbound messages are
@@ -6381,13 +6429,6 @@ class TelegramAdapter(BasePlatformAdapter):
         self._observe_bot_identity_from_message(message)
         if self._is_own_message(message):
             return False
-        # A2H default: ignore other bots (Telegram forbids bot-to-bot DMs; it
-        # flooded errors.log). A2A exception: AAA group is the musyawarah room
-        # (Hermes ↔ OpenClaw ↔ FORGE). Never A2A in SADO or private DMs.
-        if self._sender_is_other_bot(message):
-            a2a_chat = str(self._chat_id_str(message) or "").split(":")[0]
-            if a2a_chat != "-1003753855708":
-                return False
         if not self._is_group_chat(message):
             return True
         thread_id = self._effective_message_thread_id(message)
@@ -7086,18 +7127,6 @@ class TelegramAdapter(BasePlatformAdapter):
             user_name = chat.full_name
         else:
             user_name = chat.title if chat_type == "channel" else None
-
-        # A2A-R Identity Ingress Grounding: Check channel_aliases.json and resolve UNKNOWN
-        try:
-            from gateway.channel_directory import _aliases_path, _load_json_dict
-            _tg_aliases = _load_json_dict(_aliases_path()).get("telegram", {})
-            _uid_key = str(user.id) if user else ""
-            if _uid_key in _tg_aliases:
-                user_name = _tg_aliases[_uid_key]
-            elif not user_name or str(user_name).strip() in {"No name", "None", ""}:
-                user_name = f"UNKNOWN_{_uid_key}" if _uid_key else "UNKNOWN"
-        except Exception:
-            pass
         source = self.build_source(
             chat_id=str(chat.id), chat_name=chat.title or (chat.full_name if has_full_name else None), chat_type=chat_type,
             user_id=(str(user.id) if user else (str(chat.id) if chat_type in {"dm", "channel"} else None)),
