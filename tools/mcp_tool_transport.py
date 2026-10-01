@@ -550,7 +550,7 @@ class MCPServerTransportMixin:
                 raise ImportError(f"MCP server '{self.name}' requires mcp >= 1.24.0 to "
                                   "enforce the portable redirect-header boundary "
                                   "(strict_redirect_headers). Upgrade the mcp package.")
-            return _core.streamablehttp_client(url, headers=headers, timeout=float(connect_timeout), verify=ssl_verify,
+            return _core.streamable_http_client(url, headers=headers, timeout=float(connect_timeout), verify=ssl_verify,
                                                **_present(auth=oauth_auth))
         # Explicit AsyncClient matching the SDK's create_mcp_http_client defaults; MUST come from the
         # SDK's httpx (httpx2 on mcp >= 2.0) since the SDK sends its own Requests through it.
