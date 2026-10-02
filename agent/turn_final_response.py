@@ -12,7 +12,9 @@ import logging
 from typing import Any, Dict, Optional
 
 from agent.message_metadata import append_message
-from agent.repetition_guard import STOP_PATH_MIN_CHARS, is_runaway_repetition
+from agent.repetition_guard import (
+    ATTRACTOR_MIN_RUN, STOP_PATH_MIN_CHARS, is_runaway_repetition, token_run,
+)
 from agent.turn_failure_copy import stamp_failure
 from agent.turn_empty_response import recover_empty_response
 from agent.turn_stop_gates import apply_stop_gates
@@ -255,15 +257,33 @@ def finish_text_response(
     # A provider may end a degenerate loop normally with finish_reason="stop" instead of
     # exhausting its output cap (#100716). Check every completed visible text response before
     # any verify/kanban interim emission or durable transcript write.
-    # Runaway scale and shape only: a completed answer the user asked to be repetitive is
-    # delivered, unlike a length-truncated fragment that burned the whole budget.
-    if (
-        final_response
-        and len(final_response) >= STOP_PATH_MIN_CHARS
-        and is_runaway_repetition(final_response)
+    #
+    # Two independent rules, because they fail differently:
+    #
+    #   * attractor lock — one WORD repeated >= ATTRACTOR_MIN_RUN times. No length floor: 8 of
+    #     the 9 measured incidents were under STOP_PATH_MIN_CHARS and were therefore never
+    #     examined at all (a 409-char reply and a 3,993-char one both reached a human).
+    #   * runaway scale and shape — the original #100716 rule, kept for long multi-line loops.
+    #     It stays length-gated so an answer the user asked to be repetitive is still delivered.
+    #
+    # The attractor rule intentionally overrides that leniency for single-word locks: a 132 KB
+    # reply of one word repeated 12,479 times cleared the length gate and was then waved through
+    # by is_runaway_repetition's distinct-line ratio, because a one-token loop is a single
+    # enormous line and reads as "all lines distinct". See repetition_guard.ATTRACTOR_MIN_RUN.
+    attractor_run, attractor_token = token_run(final_response) if final_response else (0, "")
+    if final_response and (
+        attractor_run >= ATTRACTOR_MIN_RUN
+        or (
+            len(final_response) >= STOP_PATH_MIN_CHARS
+            and is_runaway_repetition(final_response)
+        )
     ):
         line, user_response, error = _REPETITION_STOPPED
-        agent._vprint(f"{agent.log_prefix}{line}", force=True, diagnostic=True)
+        agent._vprint(
+            f"{agent.log_prefix}{line} "
+            f"(attractor={attractor_token!r} run={attractor_run} chars={len(final_response)})",
+            force=True, diagnostic=True,
+        )
         agent._cleanup_task_resources(effective_task_id)
         agent._persist_session(messages, conversation_history)
         return _verdict("return", stamp_failure(

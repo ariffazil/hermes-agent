@@ -10,6 +10,7 @@ conservative: only LONG verbatim repeats (60+ chars) covering a majority of the 
 from __future__ import annotations
 
 import math
+import re
 from collections import Counter
 
 # Below this length the check doesn't run: short truncations trivially
@@ -154,3 +155,79 @@ def _line_repetition_dominated(text: str, n: int) -> bool:
     """True when a single normalized line covers half the fragment via repeats."""
     counts = Counter(norm for norm in (line.strip() for line in text.splitlines()) if norm)
     return any(c >= _MIN_REPEAT_COUNT and c * len(line) >= n * _DOMINANCE_RATIO for line, c in counts.items())
+
+
+# ---------------------------------------------------------------------------
+# Attractor lock — one WORD repeating, not one window or one line.
+#
+# Both detectors above look for structure: a 60-char verbatim window, or a duplicated LINE.
+# A single-token attractor defeats them both. The degenerate text is one enormous line, so
+# ``is_runaway_repetition``'s distinct-line ratio reads it as *non*-repetitive and returns
+# False even when ``is_repetition_dominated`` already said True.
+#
+# Measured 2026-10-02 (FI-003) against 9 confirmed incidents and 22,246 real assistant rows:
+# the stop-path guard as shipped blocked **0 of 9**. Eight incidents were shorter than
+# STOP_PATH_MIN_CHARS so they were never examined; the ninth (132,625 chars, one token
+# repeated 12,479 times) cleared the length gate and was then waved through by the
+# distinct-line shape check. The same run-length rule below blocked 7 of 9 with **0 false
+# positives** on all 22,246 rows.
+#
+# The attractor token is whatever the persona register makes most salient — observed locking
+# onto four different tokens across incidents ('sayang', 'ekos', 'arif', 'punya') — so no word
+# list is used or would survive.
+#
+# Deliberately length-independent: run length, not total length, is what separates a loop from
+# prose. The 22,246-row calibration scored the GLOBAL longest run and found 0 false positives;
+# token_run below scores per line, which can only lower a score, so that 0 holds a fortiori
+# while also sparing repeated markdown/checklist rows. Recall is unchanged: every incident kept
+# a per-line run >= 14 (measured 12479 / 2326 / 1827 / 1322 / 218 / 22 / 14).
+ATTRACTOR_MIN_RUN = 12
+_ATTRACTOR_TOKEN_RE = re.compile(r"[0-9A-Za-z']+")
+
+
+def token_run(text: str) -> tuple[int, str]:
+    """Longest run of one identical word repeated consecutively *within a line*, and that word.
+
+    Single linear pass over the text. Punctuation and whitespace between repeats do not break
+    the run, so ``"punya. Punya punya,"`` counts as 3. A newline DOES break it.
+
+    The newline rule is measured, not stylistic. Across the 9 production incidents the lock was
+    intra-line in every case (8 had global run == per-line run exactly; the ninth lost 3 of
+    1,325 to a line break). Meanwhile the shape it must not be confused with — a markdown table
+    or checklist whose rows repeat — is newline-separated by construction, so scoring per line
+    drops that from a run of 240 to a run of 3. Cross-line repetition is already owned by
+    :func:`_line_repetition_dominated`; this function owns the intra-line word lock, and the
+    two do not overlap.
+
+    Returns ``(0, "")`` for empty or non-string input.
+    """
+    if not isinstance(text, str) or not text:
+        return 0, ""
+    best = 0
+    best_tok = ""
+    for line in text.split("\n"):
+        cur = 0
+        prev = None
+        for tok in _ATTRACTOR_TOKEN_RE.findall(line):
+            low = tok.lower()
+            cur = cur + 1 if low == prev else 1
+            prev = low
+            if cur > best:
+                best, best_tok = cur, low
+    return best, best_tok
+
+
+def is_attractor_locked(text: str, min_run: int = ATTRACTOR_MIN_RUN) -> bool:
+    """True when one word repeats consecutively ``min_run`` or more times within a line.
+
+    Unlike :func:`is_repetition_dominated` this does not require a minimum text length, so a
+    409-char reply that locked is caught as readily as a 132 KB one.
+
+    Known accepted false positive: a user who literally asks for the same word a dozen or more
+    times on one line ("say OK 50 times") is blocked. That request is rare on these lanes and
+    re-askable; the alternative measured in the wild is 132 KB of one word delivered to a human.
+    The trade is deliberate — do not "fix" it by reintroducing a length floor, which is exactly
+    what let 8 of the 9 incidents through.
+    """
+    return token_run(text)[0] >= min_run
+

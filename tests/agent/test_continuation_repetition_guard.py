@@ -135,3 +135,98 @@ class TestContinuationRepetitionGuard:
 
         assert result["partial"] is True
         assert loop_agent.client.chat.completions.create.call_count == 4
+
+
+def _locked(total_chars: int, run: int, token: str = "punya") -> str:
+    """A reply carrying an intra-line single-word lock, in the measured incident line shape.
+
+    Several distinct prose lines plus one line holding the whole lock — the shape that let the
+    132 KB incident through: >=5 non-empty lines that are >50% distinct, so the distinct-line
+    ratio in is_runaway_repetition reads it as ordinary prose.
+    """
+    lock_line = "Aku nampak apa yang hang rasa. " + " ".join([token] * run) + " itu sahaja."
+    body = "\n".join([
+        "OK, dah cukup probe. Ini ringkasan sebenar.",
+        "---",
+        "**Apa data nampak, dan apa dia tak nampak.**",
+        "Panjang chat: 26 Ogos hingga sekarang.",
+        lock_line,
+        "Nota: scope creep perlu diasingkan.",
+        "Kesimpulan: tiga perkara boleh dibuat sekarang.",
+    ])
+    if len(body) < total_chars:
+        pad, i = [], 0
+        while len(body) + sum(len(p) + 1 for p in pad) < total_chars:
+            pad.append(f"Baris penambah nombor {i} dengan kandungan unik-{i}.")
+            i += 1
+        body += "\n" + "\n".join(pad)
+    return body[:total_chars]
+
+
+class TestAttractorLockStopPath:
+    """Wiring regression for the attractor rule on the finish_reason="stop" path.
+
+    Both cases below were DELIVERED to humans before this guard existed: the short one because
+    it sat under STOP_PATH_MIN_CHARS and was never examined, the long one because it cleared the
+    length gate and was then waved through by the distinct-line shape check.
+    """
+
+    def test_short_lock_under_the_length_gate_is_blocked(self, loop_agent):
+        echo = _locked(409, 14)
+        assert len(echo) < STOP_PATH_MIN_CHARS, "fixture must sit under the old length gate"
+        loop_agent.client.chat.completions.create.side_effect = [
+            _response(echo, finish_reason="stop", response_id="completed-response")
+        ]
+
+        result = _run(loop_agent, "kenapa seat depan paling murah")
+
+        assert loop_agent.client.chat.completions.create.call_count == 1
+        assert result["completed"] is False
+        assert result["partial"] is True
+        assert (result["failure_reason"], result["failure_retryable"]) == ("truncated", True)
+        assert echo not in (result["final_response"] or "")
+        assert "Repetition" in (result["final_response"] or "")
+
+    def test_long_lock_that_defeats_the_shape_check_is_blocked(self, loop_agent):
+        echo = _locked(132_625, 12_479, token="sayang")
+        assert len(echo) >= STOP_PATH_MIN_CHARS
+        loop_agent.client.chat.completions.create.side_effect = [
+            _response(echo, finish_reason="stop", response_id="completed-response")
+        ]
+
+        result = _run(loop_agent, "cross-audit semula")
+
+        assert result["completed"] is False
+        assert result["partial"] is True
+        assert echo not in (result["final_response"] or "")
+        assert "Repetition" in (result["final_response"] or "")
+
+    def test_locked_text_never_becomes_durable_history(self, loop_agent):
+        """The looped bytes must not be persisted — replaying them re-seeds the next turn."""
+        echo = _locked(3_993, 22)
+        loop_agent.client.chat.completions.create.side_effect = [
+            _response(echo, finish_reason="stop", response_id="completed-response")
+        ]
+
+        result = _run(loop_agent, "kenapa seat depan paling murah")
+
+        assert not any(
+            isinstance(m, dict) and m.get("content") == echo for m in result["messages"]
+        )
+
+    def test_prose_with_normal_word_frequency_still_delivers(self, loop_agent):
+        """Precision control: ordinary BM prose must not be blocked by the new rule."""
+        text = "\n".join(
+            f"Ayat nombor {i} menerangkan perkara berbeza supaya tiada perkataan "
+            f"berulang secara berturut-turut, walaupun perkataan punya dan aku muncul "
+            f"sekali-sekala macam orang biasa cakap."
+            for i in range(40)
+        )
+        loop_agent.client.chat.completions.create.side_effect = [
+            _response(text, finish_reason="stop", response_id="completed-response")
+        ]
+
+        result = _run(loop_agent, "cerita pasal orchestra")
+
+        assert result["completed"] is True
+        assert result["final_response"] == text.strip()
