@@ -3016,7 +3016,31 @@ class GatewayTurnMixin:
         """Profile-scoping wrapper around ``_run_agent_inner`` (same keyword parameters; pass-through
         when multiplexing is off)."""
         with self._profile_scope_for_source(source):
-            return await self._run_agent_inner(message, context_prompt, history, source, session_id, **turn_kwargs)
+            # 2026-10-02 333-AGI (SOVEREIGN directive): heartbeat for long provider waits.
+            # Upstream implemented PlatformAdapter._keep_typing but never wired a caller —
+            # a turn spending 60-90s on the provider showed no typing, user pings, ping
+            # interrupts the turn. Bounded typing loop for the whole direct turn; cancel
+            # on return. Never fails a turn; skipped for paused chats.
+            _typing_task = None
+            try:
+                _typing_adapter = self._delivery_adapter_for(source)
+                if _typing_adapter is not None and getattr(_typing_adapter, "_keep_typing", None) is not None:
+                    _thread_metadata = self._thread_metadata_for_source(source, None)
+                    _typing_task = asyncio.create_task(
+                        _typing_adapter._keep_typing(
+                            source.chat_id, interval=6.0, metadata=_thread_metadata,
+                        )
+                    )
+            except Exception as _typing_err:
+                logger.debug("typing heartbeat start skipped: %s", _typing_err)
+                _typing_task = None
+            try:
+                return await self._run_agent_inner(message, context_prompt, history, source, session_id, **turn_kwargs)
+            finally:
+                if _typing_task is not None:
+                    _typing_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await _typing_task
 
     def _run_agent_display_settings(self, source: SessionSource) -> "GatewayRunner._RunAgentDisplay":
         """Resolve per-platform display, progress, status and streaming-surface settings for a turn."""
