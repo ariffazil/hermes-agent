@@ -37,7 +37,35 @@ DEFAULT_DELIVERY_WAIT_TIMEOUT_SECONDS = 300.0
 
 
 def _prune_terminal_unlocked(conn: sqlite3.Connection) -> None:
-    """Redact terminal payloads and retain only bounded outcome metadata."""
+    """Redact terminal payloads and retain only bounded outcome metadata.
+
+    2026-10-02 FI-008 delivery-provenance repair (F13 SAH):
+    Promoting a delivery to a tombstone now lifts the provenance fields
+    (job_id, run_id, source_event_id, audience_class, destination_ref,
+    classification, message_fingerprint, queued_at, sent_at) BEFORE the
+    payload is scrubbed. After scrub the live row retains outcome-only
+    metadata; the tombstone row retains the causal chain. Privacy boundary
+    preserved: message body never stored in tombstone; only SHA-256 fingerprint.
+    CONTEXT (C-AUDIT-PROVENANCE-2026-10-02)."""
+    # 1. Lift provenance into tombstone BEFORE scrub — preserves the
+    #    "which job caused this human message?" answer without body bytes.
+    conn.execute(
+        """INSERT OR IGNORE INTO delivery_tombstones
+              (execution_id, terminal_status, finished_at,
+               job_id, run_id, source_event_id,
+               audience_class, destination_ref, classification,
+               message_fingerprint, queued_at, sent_at)
+           SELECT execution_id, status, finished_at,
+                  job_id, run_id, source_event_id,
+                  audience_class, destination_ref, classification,
+                  message_fingerprint, created_at,
+                  COALESCE(sent_at, created_at)
+           FROM deliveries
+           WHERE status IN ('delivered','failed','unknown','suppressed')
+             AND execution_id NOT IN (SELECT execution_id FROM delivery_tombstones)
+             AND (job_id IS NOT NULL OR message_fingerprint IS NOT NULL)"""
+    )
+    # 2. Scrub the live-row payload. The provenance is now durable in the tombstone.
     conn.execute(
         """UPDATE deliveries SET job_json='{}', content=''
            WHERE status IN ('delivered','failed','unknown','suppressed')
@@ -54,8 +82,16 @@ def _prune_terminal_unlocked(conn: sqlite3.Connection) -> None:
     if excess > 0:
         conn.execute(
             """INSERT OR IGNORE INTO delivery_tombstones
-               (execution_id, terminal_status, finished_at)
-               SELECT execution_id, status, finished_at FROM deliveries
+               (execution_id, terminal_status, finished_at,
+                job_id, run_id, source_event_id,
+                audience_class, destination_ref, classification,
+                message_fingerprint, queued_at, sent_at)
+               SELECT execution_id, status, finished_at,
+                      job_id, run_id, source_event_id,
+                      audience_class, destination_ref, classification,
+                      message_fingerprint, created_at,
+                      COALESCE(sent_at, created_at)
+               FROM deliveries
                WHERE status IN ('delivered','failed','unknown','suppressed')
                ORDER BY finished_at, created_at, execution_id
                LIMIT ?""",
@@ -132,6 +168,54 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
         conn, "deliveries", "for_failure",
         "for_failure INTEGER NOT NULL DEFAULT 0",
     )
+    # 2026-10-02 FI-008 delivery-provenance repair (F13 SAH).
+    # The ``deliveries`` payload is scrubbed (``job_json='{}' content=''``) on terminal
+    # to bound retention, but the audit layer still needs to answer: which job caused
+    # which human message? Tombstone extended with provenance (no message content).
+    # History rows whose job_id was already scrubbed stay UNKNOWN_HISTORICAL — no
+    # backfill. CONTEXT (C-AUDIT-PROVENANCE-2026-10-02).
+    for col, decl in [
+        ("job_id",                  "TEXT"),
+        ("run_id",                  "TEXT"),
+        ("source_event_id",         "TEXT"),
+        ("audience_class",          "TEXT"),
+        ("destination_ref",         "TEXT"),
+        ("classification",          "TEXT"),
+        ("message_fingerprint",     "TEXT"),
+        ("queued_at",               "TEXT"),
+        ("sent_at",                 "TEXT"),
+    ]:
+        add_column_if_missing(
+            conn, "delivery_tombstones", col, f"{col} {decl}"
+        )
+    # Same provenance fields on the live deliveries row so the tombstone writer
+    # can lift them at terminal time.
+    for col, decl in [
+        ("job_id",                  "TEXT"),
+        ("run_id",                  "TEXT"),
+        ("source_event_id",         "TEXT"),
+        ("audience_class",          "TEXT"),
+        ("destination_ref",         "TEXT"),
+        ("classification",          "TEXT"),
+        ("message_fingerprint",     "TEXT"),
+        ("queued_at",               "TEXT"),
+        ("sent_at",                 "TEXT"),
+    ]:
+        add_column_if_missing(
+            conn, "deliveries", col, f"{col} {decl}"
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tomb_job_id "
+        "ON delivery_tombstones(job_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tomb_audience "
+        "ON delivery_tombstones(audience_class)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_deliveries_job_id "
+        "ON deliveries(job_id)"
+    )
 
 
 def _connect() -> sqlite3.Connection:
@@ -168,6 +252,8 @@ def enqueue(
     for_failure: bool = False,
 ) -> dict:
     """Persist one idempotent delivery request before the worker waits."""
+    # Provenance extracted up front so it survives payload scrub.
+    prov = _extract_provenance(execution_id, job, content)
     with _transaction() as conn:
         # Serialize the tombstone check and insert with retention in other
         # processes, which can move a terminal delivery into the tombstone table.
@@ -195,10 +281,56 @@ def enqueue(
                 _hermes_now().isoformat(),
             ),
         )
+        # Persist provenance on the delivery row so the tombstone writer can lift it.
+        conn.execute(
+            """UPDATE deliveries SET
+                  job_id=?, run_id=?, source_event_id=?,
+                  audience_class=?, destination_ref=?, classification=?,
+                  message_fingerprint=?
+               WHERE execution_id=? AND job_id IS NULL""",
+            (
+                prov.get("job_id"), prov.get("run_id"), prov.get("source_event_id"),
+                prov.get("audience_class"), prov.get("destination_ref"), prov.get("classification"),
+                prov.get("message_fingerprint"), str(execution_id),
+            ),
+        )
         row = conn.execute(
             "SELECT * FROM deliveries WHERE execution_id=?", (str(execution_id),)
         ).fetchone()
     return dict(row)
+
+
+def _extract_provenance(execution_id: str, job: dict, content: str) -> dict:
+    """Build the durable-provenance payload from job metadata + content fingerprint.
+
+    Returns ONLY non-sensitive fields. Body bytes are never retained — only a SHA-256
+    fingerprint over a canonical projection of the outbound message so the audit layer
+    can link two receipts of the same message without exposing its body.
+    CONTEXT (C-AUDIT-PROVENANCE-2026-10-02)."""
+    import hashlib
+    job_id = job.get("id") or job.get("job_id")
+    deliver = job.get("deliver") or job.get("delivery") or ""
+    audience_class = "machine_housekeeping" if str(job.get("lane", "")) == "machine" else "human"
+    # Classification is set by the gate script in its stdout block title (CHANGED / WARNING / ERROR / RECOVERED / NO_CHANGE / FALSIFIED).
+    classification = None
+    head = (content or "").splitlines()[0] if content else ""
+    head_up = head.upper()
+    for tag in ("ERROR", "WARNING", "RECOVERED", "CHANGED", "FALSIFIED", "NO_CHANGE",
+                "DRIFT", "BACKUP", "TRIPWIRE"):
+        if tag in head_up:
+            classification = tag
+            break
+    fingerprint_src = (content or "").strip()
+    fp = hashlib.sha256(fingerprint_src.encode("utf-8", errors="replace")).hexdigest() if fingerprint_src else None
+    return {
+        "job_id": job_id,
+        "run_id": job_id,           # run_id == job_id at this layer; execution_id is the delivery-instance id
+        "source_event_id": job_id,  # source_event_id surfaces the originator (cron schedule); same as job_id today
+        "audience_class": audience_class,
+        "destination_ref": deliver,
+        "classification": classification,
+        "message_fingerprint": fp,
+    }
 
 
 def get_status(execution_id: str) -> Optional[dict]:
@@ -260,13 +392,14 @@ def _finish(execution_id: str, *, error: Optional[str], suppressed: bool = False
     )
     with _transaction() as conn:
         cur = conn.execute(
-            """UPDATE deliveries SET status=?, finished_at=?, error=?
+            """UPDATE deliveries SET status=?, finished_at=?, error=?, sent_at=?
                WHERE execution_id=? AND status='delivering'
                  AND owner_process_id=? AND owner_pid=?""",
             (
                 status,
                 _hermes_now().isoformat(),
                 safe_error,
+                _hermes_now().isoformat(),
                 execution_id,
                 _PROCESS_ID,
                 os.getpid(),
