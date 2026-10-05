@@ -288,6 +288,36 @@ def test_stored_prompt_cwd_ignores_project_host_decoys(monkeypatch, tmp_path):
     assert not _stored_prompt_matches_runtime(agent, unstamped)
 
 
+def test_soul_stamp_follows_bytes_not_mtime(tmp_path, monkeypatch):
+    """A same-second rewrite of SOUL.md still changes the stamp and invalidates the stored prompt."""
+    import os
+
+    from agent.conversation_loop import _stored_prompt_matches_runtime
+    from agent.prompt_builder import soul_file_stamp
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    token = set_hermes_home_override(str(tmp_path))
+    try:
+        soul = tmp_path / "SOUL.md"
+        soul.write_text("alpha\n", encoding="utf-8")
+        os.utime(soul, (1_700_000_000, 1_700_000_000))
+        first = soul_file_stamp()
+        soul.write_text("beta\n", encoding="utf-8")
+        os.utime(soul, (1_700_000_000, 1_700_000_000))
+        second = soul_file_stamp()
+        assert first != "missing"
+        assert second != "missing"
+        assert first != second
+        assert os.stat(soul).st_mtime == 1_700_000_000
+        old_prompt = f"User home directory: /example\nSoul file: {first}\n"
+        agent = _make_agent(platform="cli", model="", provider="")
+        assert _stored_prompt_matches_runtime(agent, old_prompt) is False
+        live_prompt = f"User home directory: /example\nSoul file: {second}\n"
+        assert _stored_prompt_matches_runtime(agent, live_prompt) is True
+    finally:
+        reset_hermes_home_override(token)
+
+
 def test_stored_prompt_stamped_for_another_session_is_not_restored(monkeypatch, tmp_path):
     """With the Session ID trailer on, a prompt persisted for another session (a /branch child
     copies its parent's bytes) must rebuild instead of telling the model the parent's id."""
