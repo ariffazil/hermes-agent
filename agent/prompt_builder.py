@@ -1010,6 +1010,22 @@ def _clear_backend_probe_cache() -> None:
     _BACKEND_PROBE_CACHE.clear()
 
 
+def soul_file_stamp() -> str:
+    """First 16 hex chars of ``$HERMES_HOME/SOUL.md``. ``missing`` when the file cannot be read.
+
+    Content hash, not mtime: a same-second rewrite still changes the stamp. The prompt
+    matcher treats a missing or different stamp as a stale photocopy of the mouth.
+    """
+    import hashlib
+
+    path = get_hermes_home() / "SOUL.md"
+    try:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return "missing"
+    return digest[:16]
+
+
 def _local_host_hints() -> list[str]:
     """Host OS / home / cwd block for a local terminal backend (tools run on this host)."""
     import platform
@@ -1025,6 +1041,8 @@ def _local_host_hints() -> list[str]:
         host_lines.append(f"Current working directory: {resolve_agent_cwd()}")
     except OSError:
         pass
+    # Inside the three lines runtime_host_value reads after "User home directory:".
+    host_lines.append(f"Soul file: {soul_file_stamp()}")
     # The model reaches for the system temp dir by reflex (tmpfs on most Linux hosts, fills RAM);
     # naming Hermes' scratch dir here is what makes the TMPDIR export a habit rather than a hidden default.
     try:
@@ -1090,6 +1108,10 @@ def build_environment_hints() -> str:
     backend = (_tenv_read("TERMINAL_ENV") or "local").strip().lower()
     is_remote_backend = backend in _REMOTE_TERMINAL_BACKENDS or _plugin_backend_is_remote(backend)
     hints = [_remote_backend_hint(backend)] if is_remote_backend else _local_host_hints()
+    if is_remote_backend and hints:
+        # Remote hints have no "User home directory:" line. The stamp still has to sit in
+        # the runtime block so a soul edit flushes that photocopy too.
+        hints[0] = hints[0].rstrip() + f"\nSoul file: {soul_file_stamp()}"
     hints += [WSL_ENVIRONMENT_HINT] if is_wsl() else []
     return "\n\n".join(h for h in (*hints, _embedder_environment_hint()) if h)
 

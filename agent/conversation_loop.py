@@ -31,7 +31,8 @@ from agent.prompt_caching import (
 from agent.repetition_guard import REPETITION_LOOP_INTERRUPTED, is_runaway_repetition
 from agent.runtime_cwd import resolve_agent_cwd
 from agent.surface_switch import (
-    identity_line_value, note_inert_pinned_tools, runtime_host_value, stage_surface_switch_note,
+    identity_line_value, note_inert_pinned_tools, runtime_host_value, split_runtime_boundary,
+    stage_surface_switch_note,
 )
 from agent.turn_context import PreflightCompressionTimedOut, build_turn_context
 from agent.turn_retry_state import TurnRetryState
@@ -853,6 +854,25 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     )
 
 
+def _stored_soul_stamp(prompt: str) -> str:
+    """Soul stamp from the host window, else from the delimited runtime block.
+
+    Project prose may quote the label. Only the host window (legacy prompts) and the
+    runtime block (current prompts, including a remote backend with no home line) count.
+    """
+    stamped = runtime_host_value(prompt, "Soul file")
+    if stamped:
+        return stamped
+    _identity, runtime_marker, runtime = split_runtime_boundary(prompt)
+    if not runtime_marker:
+        return ""
+    prefix = "Soul file:"
+    for line in runtime.splitlines():
+        if line.startswith(prefix):
+            return line[len(prefix):].strip()
+    return ""
+
+
 def _stored_prompt_matches_runtime(agent, prompt: str) -> bool:
     """Return False when the persisted runtime-identity lines are stale."""
     # Model/provider identity, then cwd drift.  A cwd change is a real content change (context
@@ -880,6 +900,16 @@ def _stored_prompt_matches_runtime(agent, prompt: str) -> bool:
     # Platform is deliberately NOT an identity field: a surface switch does not invalidate the
     # stored bytes, it only makes their interface section out of date, and that is corrected by
     # agent.surface_switch.stage_surface_switch_note without touching the cached prefix (#104414).
+    # SOUL.md is identity. A missing stamp is an old photocopy; a different stamp is a new mouth.
+    # Fail toward a rebuild when the live file cannot be hashed.
+    try:
+        from agent.prompt_builder import soul_file_stamp
+        current_soul = soul_file_stamp()
+    except Exception:
+        logger.debug("soul stamp unreadable; treating stored prompt as stale", exc_info=True)
+        return False
+    if _stored_soul_stamp(prompt) != current_soul:
+        return False
     return True
 
 

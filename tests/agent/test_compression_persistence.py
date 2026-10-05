@@ -363,10 +363,12 @@ class TestStoredPromptCwdDrift:
         Fixtures must therefore include the anchor or they stop exercising the
         cwd path at all.
         """
+        from agent.prompt_builder import soul_file_stamp
         return (
             "Host: Linux (6.16.0)\n"
             "User home directory: /home/tester\n"
             f"Current working directory: {cwd}\n"
+            f"Soul file: {soul_file_stamp()}\n"
         )
 
     def test_stored_prompt_stale_when_cwd_differs(self):
@@ -425,7 +427,8 @@ class TestStoredPromptCwdDrift:
             self._host_block(current_cwd)
             + "\n# AGENTS.md\n\n"
             "Our deploy convention:\n\n"
-            "Current working directory: /srv/decoy\n\n"
+            "Current working directory: /srv/decoy\n"
+            "Soul file: decoy-stamp\n\n"
             "Always run make before pushing.\n\n"
             "Model: test/model\n"
             "Provider: openrouter\n"

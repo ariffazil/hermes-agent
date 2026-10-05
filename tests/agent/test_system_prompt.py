@@ -274,10 +274,18 @@ def test_stored_prompt_cwd_ignores_project_host_decoys(monkeypatch, tmp_path):
     monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
     assert not _stored_prompt_matches_runtime(agent, full)
     # Previously persisted host-before-context prompts keep their original anchor.
-    legacy = f"Host: Example\nUser home directory: {tmp_path}\nCurrent working directory: {cwd}\n\n# Project Context\n\n{decoy}\nModel: test-model\nProvider: test-provider\nPlatform: cli"
+    from agent.prompt_builder import soul_file_stamp
+    stamp = soul_file_stamp()
+    legacy = (
+        f"Host: Example\nUser home directory: {tmp_path}\nCurrent working directory: {cwd}\n"
+        f"Soul file: {stamp}\n\n# Project Context\n\n{decoy}\nModel: test-model\n"
+        "Provider: test-provider\nPlatform: cli"
+    )
     assert not _stored_prompt_matches_runtime(agent, legacy)
     monkeypatch.setenv("TERMINAL_CWD", str(cwd))
     assert _stored_prompt_matches_runtime(agent, legacy)
+    unstamped = legacy.replace(f"Soul file: {stamp}\n", "", 1)
+    assert not _stored_prompt_matches_runtime(agent, unstamped)
 
 
 def test_stored_prompt_stamped_for_another_session_is_not_restored(monkeypatch, tmp_path):
