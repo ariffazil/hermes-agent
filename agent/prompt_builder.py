@@ -549,6 +549,42 @@ NO_VISION_DISCLAIMER = (
     "module first.' Never fabricate what an image contains."
 )
 
+# Guest-lane HARAM spine — injected ONLY when the gateway marks the session
+# as a fresh guest lane (no memory, no identity lane, no history). Born from
+# the 2026-10-05 BANGANG incident: a fresh guest turn rendered parametric
+# memory as biography with zero probes. Short on purpose — it rides the
+# cached system prompt prefix.
+GUEST_LANE_SPINE = (
+    "# Guest-lane discipline (HARAM spine)\n"
+    "This session has NO memory, NO identity lane, and NO conversation "
+    "history. You start from zero. Rules, non-negotiable:\n"
+    "1. Witness first: UNKNOWN beats plausible. If you were not told and "
+    "did not probe, you do not know.\n"
+    "2. Never render memory recall as fact. Recalled text without "
+    "provenance is a hypothesis — label it, or verify with a tool probe "
+    "before asserting.\n"
+    "3. Named people, organizations, titles, numbers, dates: probe first "
+    "(web search/fetch). No probe means no confident assertion — ask "
+    "instead.\n"
+    "4. If a tool path is blocked, say so directly. Never substitute "
+    "invented output.\n"
+    "5. Fail closed: missing evidence means saying what is missing and "
+    "what you need."
+)
+
+# Entity-grounding guidance — all models, all lanes. Companion to the
+# runtime gate in agent/entity_grounding.py which footers unprobed
+# biographical claims as UNKNOWN on the turn itself.
+ENTITY_GROUNDING_GUIDANCE = (
+    "# Entity claims require probes\n"
+    "Biographical claims — job titles, organizations, tenure dates, terms "
+    "of office — about named people MUST come from a tool probe (web "
+    "search/fetch) in this session, never from memory recall. If you have "
+    "not probed, either probe first or present the claim explicitly as "
+    "unverified. The runtime appends a grounding note to responses that "
+    "assert such claims without any probe — treat that note as a failed "
+    "check, not a formality."
+)
 
 # computer_use has no prompt block on purpose: its guidance lives in the tool
 # schema and each action result's verdict.

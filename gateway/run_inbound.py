@@ -2033,6 +2033,21 @@ class GatewayInboundMixin:
             logger.info("Voice transcription failed for %s: %s", path, result.get("error", "unknown error"))
             return None, self._untranscribed_audio_note(path)
         transcript = result["transcript"]
+        # Fail-soft advisory (2026-10-05 scar, F13 sovereign directive): the
+        # local STT flagged the window as mostly non-speech. The transcript
+        # is still delivered — never suppressed — but the agent-visible note
+        # carries the advisory so the model knows the audio was judged
+        # unclear. The signal informs, it does not censor.
+        if result.get("no_clear_speech"):
+            logger.info(
+                "Local STT for %s returned NO_CLEAR_SPEECH — delivering transcript with advisory flag (fail-soft)",
+                path,
+            )
+            return transcript, (
+                f'"{transcript}"\n'
+                "[Advisory: speech-to-text could not clearly detect speech in this audio; "
+                "the transcript above may be unreliable — treat it as unverified.]"
+            )
         # STT may return success=True with an empty/whitespace transcript (silence, cut-off);
         # empty quotes make the agent reply to nothing and can loop, so emit a sentinel note.
         # See #41603.

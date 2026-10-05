@@ -21,6 +21,8 @@ def _make_agent(**overrides):
         _tool_use_enforcement=False,
         _environment_probe=False,
         _kanban_worker_guidance="",
+        _entity_grounding=False,
+        _guest_lane_spine=False,
         _memory_store=None,
         _memory_manager=None,
         model="",

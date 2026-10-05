@@ -2407,6 +2407,15 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
     if not isinstance(function_args, dict):
         function_args = {}
     hook_ids = tool_hook_ids(agent, effective_task_id, tool_call_id)
+
+    # Entity-grounding probe tracking — both executor paths route through
+    # here, so one hook covers concurrent and sequential dispatch.
+    try:
+        from agent.entity_grounding import note_probe_tool
+        note_probe_tool(agent, function_name)
+    except Exception:
+        pass
+
     _tool_middleware_trace = list(tool_request_middleware_trace or [])
     try:
         from hermes_cli.middleware import apply_tool_request_middleware

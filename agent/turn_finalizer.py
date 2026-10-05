@@ -629,6 +629,26 @@ def finalize_turn(
     # Response transforms apply only to real, uninterrupted responses.
     if final_response and not interrupted:
         final_response = _append_file_mutation_footer(agent, final_response, logger)
+
+    # Entity-grounding gate footer (see agent/entity_grounding.py).
+    # Advisory: the response is delivered, but any biographical claim
+    # (titles/orgs/tenures) made without a grounding-capable probe this
+    # session is explicitly marked UNKNOWN. Born from the 2026-10-05
+    # confabulation incident (parametric memory rendered as biography).
+    if final_response and not interrupted and getattr(agent, "_entity_grounding", True):
+        try:
+            from agent.entity_grounding import (
+                build_grounding_footer,
+                probed_this_session,
+                scan_ungrounded_entity_claims,
+            )
+            if not probed_this_session(agent):
+                _grounding_hits = scan_ungrounded_entity_claims(final_response)
+                if _grounding_hits:
+                    _gfooter = build_grounding_footer(_grounding_hits)
+                    final_response = final_response.rstrip() + "\n\n" + _gfooter
+        except Exception as _ground_err:
+            logger.debug("entity-grounding footer failed: %s", _ground_err)
     if not interrupted:
         final_response = _explain_abnormal_exit(
             agent, final_response, _turn_exit_reason, preserved_verification_fallback, logger,

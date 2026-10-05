@@ -1856,6 +1856,14 @@ def _execute_tool_calls_sequential(agent, assistant_message, messages: list, eff
                 return
             continue
 
+        # Entity-grounding probe tracking (sequential path; the concurrent
+        # path is covered by invoke_tool).
+        try:
+            from agent.entity_grounding import note_probe_tool
+            note_probe_tool(agent, ref.name)
+        except Exception:
+            pass
+
         tool_start_time = time.time()
         dispatch = _resolve_sequential_dispatch(agent, ref, messages)
         managed, tool_duration = _run_sequential_call(

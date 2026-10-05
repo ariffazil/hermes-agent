@@ -199,6 +199,14 @@ _VAD_MIN_SILENCE_MS_DEFAULT = 500
 _NO_SPEECH_PROB_THRESHOLD_DEFAULT = 0.6
 _LOGPROB_THRESHOLD_DEFAULT = -1.0
 
+# Fail-soft advisory marker + threshold (2026-10-05 scar, F13 sovereign
+# directive): when the audio window scores as mostly non-speech, the
+# transcript is annotated with NO_CLEAR_SPEECH and the caller attaches a
+# ``no_clear_speech`` advisory flag. The transcript is still DELIVERED —
+# the signal informs, it never censors.
+NO_CLEAR_SPEECH_MARKER = "NO_CLEAR_SPEECH"
+_NO_SPEECH_AVG_THRESHOLD_DEFAULT = 0.3
+
 
 def build_local_transcribe_kwargs(stt_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Kwargs for EVERY local faster-whisper ``model.transcribe`` call — single owner of the anti-hallucination hardening."""
@@ -246,18 +254,76 @@ def _is_hallucinated_segment(segment: Any, no_speech_threshold: float, logprob_t
         return False
 
 
-def _join_confident_segments(segments: Any, local_cfg: Dict[str, Any]) -> str:
-    """Join segment texts, dropping probable silence hallucinations."""
+def _no_speech_avg_threshold(stt_config: Optional[Dict[str, Any]] = None) -> float:
+    """Resolve the advisory average no_speech_prob threshold from config."""
+    try:
+        raw = (stt_config or {}).get("no_speech_avg_threshold", _NO_SPEECH_AVG_THRESHOLD_DEFAULT)
+        val = float(raw)
+    except (TypeError, ValueError):
+        return _NO_SPEECH_AVG_THRESHOLD_DEFAULT
+    return val if val >= 0.0 else _NO_SPEECH_AVG_THRESHOLD_DEFAULT
+
+
+def _looks_like_no_clear_speech(text: str) -> bool:
+    """True when transcript text is (or carries) the NO_CLEAR_SPEECH token.
+
+    Some whisper hallucinations literally decode the English words; a
+    surviving segment that strips to the marker is treated as no-speech
+    too — the scar shape, not just the empty shape.
+    """
+    return NO_CLEAR_SPEECH_MARKER in (text or "")
+
+
+def _join_confident_segments(segments: Any, local_cfg: Dict[str, Any], stt_config: Optional[Dict[str, Any]] = None) -> str:
+    """Join segment texts, dropping probable silence hallucinations.
+
+    Advisory annotation (2026-10-05 scar, F13 fail-soft directive): when the
+    audio window scored as mostly non-speech — average segment
+    ``no_speech_prob`` above ``stt.no_speech_avg_threshold`` (default 0.3) —
+    the NO_CLEAR_SPEECH marker REPLACES the transcript text so callers can
+    attach the ``no_clear_speech`` advisory flag. The transcript is still
+    delivered (fail-soft): the flag informs, it never censors.
+    """
     no_speech_threshold, logprob_threshold = _confidence_thresholds(local_cfg)
     kept: list[str] = []
+    kept_no_speech: list[float] = []
+    all_no_speech: list[float] = []
     for segment in segments:
+        _raw_ns = getattr(segment, "no_speech_prob", None)
+        if isinstance(_raw_ns, (int, float)):  # test doubles / exotic shapes make no advisory claim
+            all_no_speech.append(float(_raw_ns or 0.0))
         if _is_hallucinated_segment(segment, no_speech_threshold, logprob_threshold):
             logger.debug("Dropping probable hallucinated segment %r (no_speech_prob=%.3f, avg_logprob=%.3f)",
                          getattr(segment, "text", ""), getattr(segment, "no_speech_prob", float("nan")),
                          getattr(segment, "avg_logprob", float("nan")))
             continue
         kept.append(segment.text.strip())
-    return " ".join(kept).strip()
+        kept_no_speech.append(all_no_speech[-1] if all_no_speech else 0.0)
+    transcript = " ".join(kept).strip()
+    if transcript:
+        avg_no_speech = (sum(kept_no_speech) / len(kept_no_speech)) if kept_no_speech else 0.0
+    elif all_no_speech:
+        avg_no_speech = sum(all_no_speech) / len(all_no_speech)
+    else:
+        avg_no_speech = 0.0
+    # Advisory average gate (2026-10-05 scar): judge the audio that produced
+    # the DELIVERED text. Kept segments when any survive, all segments
+    # otherwise. A music-only window decoding one confident foreign-language
+    # segment at no_speech_prob 0.56 must not pass unnoticed just because
+    # 0.56 sits below faster-whisper's own 0.6 segment gate.
+    if all_no_speech and avg_no_speech > _no_speech_avg_threshold(stt_config):
+        logger.info(
+            "Advisory: avg no_speech_prob=%.3f > %.3f over %s segments "
+            "— annotating transcript with NO_CLEAR_SPEECH (fail-soft)",
+            avg_no_speech, _no_speech_avg_threshold(stt_config),
+            "kept" if kept_no_speech else "all",
+        )
+        transcript = NO_CLEAR_SPEECH_MARKER
+    elif _looks_like_no_clear_speech(transcript):
+        # A surviving segment decoded the marker text itself — same
+        # hallucination shape, same advisory verdict.
+        return NO_CLEAR_SPEECH_MARKER
+    return transcript
 
 
 def _transcribe_local_command(

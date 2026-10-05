@@ -31,7 +31,8 @@ from tools.transcription_audio import (
     _validate_audio_file, _validate_audio_file_size, _validate_audio_source_file)
 from tools.transcription_local import (
     _get_idle_unload_seconds, _has_local_command, _join_confident_segments,
-    _load_local_whisper_model, _looks_like_cuda_lib_error, _normalize_local_model,
+    _load_local_whisper_model, _looks_like_cuda_lib_error, _looks_like_no_clear_speech,
+    _no_speech_avg_threshold, _normalize_local_model,
     _transcribe_local_command, _try_lazy_install_stt, build_local_transcribe_kwargs)
 # The ``_transcribe_<provider>`` handlers are looked up in this module's globals by _dispatch_stt_provider.
 from tools.transcription_cloud import (  # noqa: F401  (handlers dispatched via globals())
@@ -344,6 +345,21 @@ def _replace_cached_model_on_cpu(model_name: str):
     return model
 
 
+# Fail-soft advisory marker: present in the transcript when the local STT
+# window scored as mostly non-speech (2026-10-05 scar: music-only audio
+# produced a confident foreign-language hallucination downstream at
+# no_speech_prob 0.56). F13 sovereign directive: the transcript is DELIVERED
+# with the marker + ``no_clear_speech`` advisory flag attached — the signal
+# informs, it never censors.
+NO_CLEAR_SPEECH_MARKER = "NO_CLEAR_SPEECH"
+
+# Advisory threshold on the AVERAGE segment no_speech_prob. When the window
+# average exceeds this, _join_confident_segments annotates the transcript
+# with the NO_CLEAR_SPEECH marker. Configurable via
+# ``stt.no_speech_avg_threshold``.
+_NO_SPEECH_AVG_THRESHOLD_DEFAULT = 0.3
+
+
 def _transcribe_local(
     file_path: str, model_name: str, *, language: Optional[str] = None, prompt: Optional[str] = None
 ) -> Dict[str, Any]:
@@ -370,6 +386,7 @@ def _transcribe_local(
             # Consume inside the guard so a first-use cuBLAS/cuDNN load failure
             # retries on CPU exactly like a load-time failure does.
             segments = list(segments)
+            transcript = _join_confident_segments(segments, local_cfg, stt_config)
         except Exception as exc:
             # CUDA libs can fail at dlopen-on-first-use, AFTER loading: evict the poisoned
             # cached model, reload on CPU and retry once, else every later message fails.
@@ -380,14 +397,24 @@ def _transcribe_local(
             model = _replace_cached_model_on_cpu(model_name)
             segments, info = model.transcribe(file_path, **transcribe_kwargs)
             segments = list(segments)
-        transcript = _join_confident_segments(segments, local_cfg)
+            transcript = _join_confident_segments(segments, local_cfg, stt_config)
         logger.info("Transcribed %s via local whisper (%s, lang=%s, %.1fs audio)",
                     Path(file_path).name, model_name, info.language, info.duration)
         _touch_transcription_time()
         idle_timeout = _get_idle_unload_seconds(local_cfg)
         if idle_timeout > 0:
             _start_idle_unload_watcher(idle_timeout)
-        return _ok_result(transcript, "local")
+
+        # Fail-soft (F13 sovereign directive, supersedes the 2026-10-05
+        # fail-closed wiring): a NO_CLEAR_SPEECH transcript is DELIVERED, not
+        # suppressed. success=True, transcript passes through, and the
+        # no_clear_speech flag rides along as an advisory annotation the
+        # caller may surface — the signal informs, it never censors.
+        result = _ok_result(transcript, "local")
+        if _looks_like_no_clear_speech(transcript):
+            result["no_clear_speech"] = True
+            result["stt_unknown"] = "NO_SPEECH"
+        return result
     except Exception as e:
         logger.error("Local transcription failed: %s", e, exc_info=True)
         return _error_result(f"Local transcription failed: {e}")

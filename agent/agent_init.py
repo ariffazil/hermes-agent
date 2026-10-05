@@ -1384,7 +1384,7 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=None):
     inject_memory_provider_tools(agent)
 
 
-def _apply_agent_section(agent, _agent_cfg):
+def _apply_agent_section(agent, _agent_cfg, skip_memory=False):
     # Skills config: nudge interval for skill creation reminders
     agent._skill_nudge_interval = 10
     with suppress(Exception):
@@ -1428,6 +1428,35 @@ def _apply_agent_section(agent, _agent_cfg):
         "environment_probe", "bot_mode_protocol",
     ):
         setattr(agent, f"_{_key}", bool(_agent_section.get(_key, True)))
+
+    # ── Entity-grounding gate (config ``grounding.entity_gate``) ──────
+    # Tracks grounding-capable probes (web search/fetch/browser) per session
+    # and footers unprobed biographical claims as UNKNOWN
+    # (agent/entity_grounding.py). Advisory, not censoring. Born from the
+    # 2026-10-05 confabulation incident.
+    try:
+        _grounding_cfg = _agent_cfg.get("grounding") or {}
+        if not isinstance(_grounding_cfg, dict):
+            _grounding_cfg = {}
+        _entity_gate = _grounding_cfg.get("entity_gate", True)
+        _guest_spine_cfg = _grounding_cfg.get("guest_spine", True)
+    except Exception:
+        _entity_gate, _guest_spine_cfg = True, True
+    agent._entity_grounding = bool(_entity_gate)
+
+    # Guest-lane HARAM spine (GUEST_LANE_SPINE prompt block). Default: ON
+    # for guest lanes — a fresh session with no memory (``skip_memory=True``
+    # from the lane bootstrap) and no explicit config override gets the
+    # witness-first discipline. Named lanes carry their own constitution
+    # files, so the rule is: config ``grounding.guest_spine`` wins; else
+    # spine follows skip_memory. Explicit false disables everywhere.
+    if _guest_spine_cfg is False:
+        agent._guest_lane_spine = False
+    elif _guest_spine_cfg is True:
+        agent._guest_lane_spine = True
+    else:
+        agent._guest_lane_spine = bool(skip_memory)
+
     # Warm the probe (~0.5s of subprocesses) off-thread so the first prompt build finds it cached.
     if agent._environment_probe:
         with suppress(Exception):
@@ -2482,7 +2511,7 @@ def init_agent(
 
     _apply_display_config(agent, _agent_cfg, platform)
     _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=memory_manager)
-    _apply_agent_section(agent, _agent_cfg)
+    _apply_agent_section(agent, _agent_cfg, skip_memory=skip_memory)
     cs = _parse_compression_config(agent, _agent_cfg)
     _config_context_length, _custom_providers, _effective_context_length, _model_cfg = _resolve_context_length(
         agent, _agent_cfg, base_url

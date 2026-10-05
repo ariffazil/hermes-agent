@@ -19,8 +19,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from agent.delegation_context import owned_kanban_task
 from agent.prompt_builder import (
-    ASYNC_HANDOFF_GUIDANCE, DEFAULT_AGENT_IDENTITY, EXECUTION_GUIDANCE_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
-    HERMES_AGENT_HELP_GUIDANCE, HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS, KANBAN_GUIDANCE,
+    ASYNC_HANDOFF_GUIDANCE, DEFAULT_AGENT_IDENTITY, ENTITY_GROUNDING_GUIDANCE,
+    EXECUTION_GUIDANCE_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
+    HERMES_AGENT_HELP_GUIDANCE, HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS, GUEST_LANE_SPINE,
+    KANBAN_GUIDANCE,
     NO_VISION_DISCLAIMER,
     PARALLEL_TOOL_CALL_GUIDANCE, PLATFORM_HINTS, SESSION_SEARCH_GUIDANCE,
     SKILLS_GUIDANCE, STEER_CHANNEL_NOTE, TASK_COMPLETION_GUIDANCE, TELEGRAM_RICH_MESSAGES_HINT,
@@ -553,6 +555,17 @@ def _identity_parts(agent: Any, ctx_len: Optional[int]) -> Tuple[List[str], bool
 def _guidance_parts(agent: Any) -> List[str]:
     """Universal + tool-aware + model-gated guidance blocks, each gated by its config.yaml key."""
     parts: List[str] = []
+    # Guest-lane HARAM spine — witness-first discipline for fresh sessions
+    # with no memory or identity lane. Injected only when the gateway marks
+    # the session as a guest lane (agent._guest_lane_spine). Named lanes
+    # carry their own constitution files instead.
+    if getattr(agent, "_guest_lane_spine", False):
+        parts.append(GUEST_LANE_SPINE)
+    # Entity-grounding guidance — all models. Companion to the runtime
+    # entity-grounding gate (agent/entity_grounding.py) which tracks probes
+    # and footers unprobed biographical claims as UNKNOWN.
+    if getattr(agent, "_entity_grounding", True):
+        parts.append(ENTITY_GROUNDING_GUIDANCE)
     if agent.valid_tool_names:
         parts += [
             text for flag, text in (
