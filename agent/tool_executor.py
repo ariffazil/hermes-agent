@@ -1341,6 +1341,10 @@ class _ConcurrentBatch:
         except Exception as tool_error:
             result = f"Error executing tool '{ref.name}': {tool_error}"
             logger.error("_invoke_tool raised for %s: %s", ref.name, tool_error, exc_info=True)
+            # Auto-scar (888 ASI-edge, FI-003 2026-10-07): crash → memory, fail-open.
+            with contextlib.suppress(Exception):
+                from agent.attention_router import record_tool_scar
+                record_tool_scar(self.agent, ref.name, tool_error)
         duration = time.time() - start
         if not blocked and not dispatched:
             ref.emit_post(agent, result, duration_ms=int(duration * 1000))
@@ -1755,6 +1759,10 @@ def _run_sequential_call(
             raise
         function_result = dispatch.error_result(tool_error)
         logger.error(dispatch.error_log, ref.name, tool_error, exc_info=True)
+        # Auto-scar (888 ASI-edge, FI-003 2026-10-07): crash → memory, fail-open.
+        with contextlib.suppress(Exception):
+            from agent.attention_router import record_tool_scar
+            record_tool_scar(agent, ref.name, tool_error)
         managed = _ManagedToolResult(result=function_result, args=ref.args, middleware_trace=ref.trace, blocked=False, dispatched=False)
     finally:
         if dispatch.is_delegate:

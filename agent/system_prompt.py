@@ -300,7 +300,10 @@ def _tool_guidance_block(agent: Any) -> Optional[str]:
 
 def _skills_prompt(agent: Any) -> str:
     """Skills index (empty without skills tools).  Focus mode demotes non-coding
-    categories to names-only — never hidden, every name stays visible."""
+    categories to names-only — never hidden, every name stays visible.
+    Attention router (FI-003 2026-10-07): when a router config exists, the index is
+    narrowed to core AAA + the active lane's nonflow skills (arifFlow candidates
+    excluded → arifFlow engine :7073). Missing router ⇒ legacy full index (fail-open)."""
     if not any(name in agent.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage']):
         return ""
     import model_tools
@@ -310,8 +313,11 @@ def _skills_prompt(agent: Any) -> str:
         _compact_cats = coding_compact_skill_categories(platform=agent.platform, cwd=resolve_context_cwd())
     except Exception:
         _compact_cats = frozenset()
+    from agent import attention_router as _ar
+    _router = _ar.router_state(agent, _agent_home(agent))
     return _pb.build_skills_system_prompt(available_tools=agent.valid_tool_names, available_toolsets=avail_toolsets,
-                                         compact_categories=_compact_cats or None, skills_dir_override=_agent_skills_dir(agent))
+                                         compact_categories=_compact_cats or None, skills_dir_override=_agent_skills_dir(agent),
+                                         name_allowlist=_router.get("allowlist"), allowlist_note=_ar.skills_index_note(_router))
 
 
 def _auto_load_parts(agent: Any) -> List[str]:
@@ -538,6 +544,18 @@ def _memory_parts(agent: Any) -> List[str]:
                 _ext_mem_block = None
             if _ext_mem_block:
                 parts.append(_ext_mem_block)
+    # Entity partition (FI-003 2026-10-07, reality edge): entries tagged for a
+    # foreign entity never enter this context; the partition rule names vector_memory
+    # as the sole canonical recall lane (legacy recall_memory references are void).
+    # Fail-open: any failure here leaves the blocks as built.
+    if parts:
+        try:
+            from agent import attention_router as _ar
+            _entity = _ar.resolve_entity(_agent_home(agent))
+            parts = [_ar.partition_memory_block(p, _entity) for p in parts]
+            parts.append(_ar.MEMORY_PARTITION_RULE)
+        except Exception:
+            logger.debug("memory entity-partition skipped", exc_info=True)
     return parts
 
 
@@ -748,6 +766,13 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     _help_guidance_slot = len(stable_parts)
     stable_parts.append(HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS)
     stable_parts.extend(_guidance_parts(agent))
+    # ASI Reality Bridge (FI-003 2026-10-07, 888 directive): immutable ordering
+    # (F1 Reversibility > F2 Truth > Speed), SCAR engine, HOLD paradox containment.
+    try:
+        from agent.attention_router import ASI_REALITY_BRIDGE
+        stable_parts.append(ASI_REALITY_BRIDGE)
+    except Exception:
+        logger.debug("ASI reality bridge block skipped", exc_info=True)
     # Vision-capability disclaimer — all models (text-only models must never
     # claim pixel-level sight; benign for vision-native models).
     stable_parts.append(NO_VISION_DISCLAIMER)

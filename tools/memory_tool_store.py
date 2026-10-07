@@ -233,7 +233,21 @@ class MemoryStore:
     def _failure_with_entries(self, target: str, message: str) -> Dict[str, Any]:
         """Consolidation failure carrying the live entries so the model can consolidate."""
         return self._consolidation_failure(
-            _error(message, current_entries=self._entries_for(target), usage=self._usage(target)))
+            _error(message, current_entries=self._visible_entries_for(target), usage=self._usage(target)))
+
+    def _visible_entries_for(self, target: str) -> List[str]:
+        """Entity-filtered entries for MODEL-FACING read surfaces only (``current_entries``
+        echoes, validation hints). Mutation, matching and drift paths must keep
+        ``_entries_for()`` — whole-file rewrites preserve every entity's entries on disk
+        (single namespace by design; this filter stops context bleed, it does not
+        partition storage). Fail-open to the raw list on any resolution failure."""
+        entries = self._entries_for(target)
+        try:
+            from agent.attention_router import current_entity, entry_visible
+            entity = current_entity()
+            return [e for e in entries if entry_visible(e, entity)]
+        except Exception:
+            return entries
 
     def _batch_failure(self, target: str, message: str) -> Dict[str, Any]:
         """Batch-abort failure WITHOUT ``current_entries``: the store did not change and the
@@ -280,6 +294,10 @@ class MemoryStore:
             return _error("Content cannot be empty.")
         if scan_error := _scan_memory_content(content):
             return _error(scan_error)
+        if (foreign_msg := self._foreign_entry_error(content)):
+            # Impersonation guard: writing an entry tagged for ANOTHER entity would let it
+            # surface in that entity's context without their act — same partition, add-side.
+            return _error(foreign_msg)
 
         def _add(entries, limit):
             if content in entries:
@@ -315,22 +333,58 @@ class MemoryStore:
             return _error("old_text cannot be empty.")
         return self._edit(target, old_text.strip(), None, matched_entry)
 
+    @staticmethod
+    def _foreign_entry_error(entry: str) -> Optional[str]:
+        """Refusal message when *entry* is tagged for a foreign entity, else None.
+        Write-side of the federated memory partition (F13 SAH 2026-10-07): matching is
+        text-based, so without this guard an exact-text quote of an unseen foreign entry
+        could blind-replace or blind-remove it. Fail-open (resolution failure → no
+        refusal) mirrors the read filter."""
+        try:
+            from agent.attention_router import current_entity, entry_visible
+            if entry_visible(entry, current_entity()):
+                return None
+            return ("Entry belongs to another entity ([entity:X] tag) — cross-entity mutation is "
+                    "blocked by the federated memory partition. Only its owning entity may modify "
+                    "it; transfer is an explicit federation act, never a side effect.")
+        except Exception:
+            return None
+
     def _locate(self, entries: List[str], old_text: str, verb: str, matched_entry: Optional[str] = None):
         """Index of the entry *old_text* selects, or the error dict the edit returns. A write
         staged for approval carries the FULL entry it was reviewed against (*matched_entry*):
         only that exact entry qualifies, so replay never hits a newer entry that still
-        contains old_text."""
+        contains old_text. Cross-entity guard (F13 SAH 2026-10-07): a matched entry tagged
+        for a foreign entity resolves to a refusal — pinned or text-matched alike."""
         if matched_entry is not None:
             idx = _pinned_index(entries, matched_entry)
-            return idx if idx is not None else _error(_stale_entry_message(matched_entry))
+            if idx is None:
+                return _error(_stale_entry_message(matched_entry))
+            if (msg := self._foreign_entry_error(entries[idx])):
+                return _error(msg)
+            return idx
         idx, ambiguous = _find_unique_match(entries, old_text)
+        if isinstance(idx, int) and (msg := self._foreign_entry_error(entries[idx])):
+            return _error(msg)
         if ambiguous:
-            return _error(f"Multiple entries matched '{old_text}'. Be more specific.",
-                          matches=[e[:80] + ("..." if len(e) > 80 else "") for e in entries if old_text in e])
+            try:
+                from agent.attention_router import current_entity, entry_visible
+                _ent = current_entity()
+                _echo = [e[:80] + ("..." if len(e) > 80 else "") for e in entries
+                         if old_text in e and entry_visible(e, _ent)]
+            except Exception:
+                _echo = [e[:80] + ("..." if len(e) > 80 else "") for e in entries if old_text in e]
+            return _error(f"Multiple entries matched '{old_text}'. Be more specific.", matches=_echo)
         if idx is None:
+            try:
+                from agent.attention_router import current_entity, entry_visible
+                _ent = current_entity()
+                _echo = [e for e in entries if entry_visible(e, _ent)]
+            except Exception:
+                _echo = entries
             return self._consolidation_failure(_error(
                 f"No entry matched '{old_text}'. Check current_entries below and retry with the exact text "
-                f"of the entry you want to {verb}.", current_entries=entries))
+                f"of the entry you want to {verb}.", current_entries=_echo))
         return idx
 
     def resolve_entry(self, target: str, old_text: str, verb: str) -> Dict[str, Any]:
@@ -371,6 +425,8 @@ class MemoryStore:
         if act == "add":
             if not content:
                 return f"{pos}: content is required.", None
+            if (foreign_msg := MemoryStore._foreign_entry_error(content)):
+                return f"{pos}: {foreign_msg}", None
             if content not in working:  # idempotent -- skip duplicate, don't fail the batch
                 working.append(content)
             return None, None
@@ -390,6 +446,8 @@ class MemoryStore:
                 return f"{pos}: '{old_text}' matched multiple distinct entries -- be more specific.", None
             if idx is None:
                 return f"{pos}: no entry matched '{old_text}'.", None
+        if (foreign_msg := MemoryStore._foreign_entry_error(working[idx])):
+            return f"{pos}: {foreign_msg}", None
         previous_content = working[idx]
         working[idx:idx + 1] = [content] if act == "replace" else []
         return None, previous_content

@@ -1320,6 +1320,7 @@ def _current_session_platform_hint() -> str:
 def build_skills_system_prompt(
     available_tools: "set[str] | None" = None, available_toolsets: "set[str] | None" = None,
     compact_categories: "frozenset[str] | None" = None, skills_dir_override: "Path | None" = None,
+    name_allowlist: "set[str] | None" = None, allowlist_note: "str | None" = None,
 ) -> str:
     """Compact skill index for the system prompt.
 
@@ -1327,6 +1328,9 @@ def build_skills_system_prompt(
     ``compact_categories`` (coding posture) demotes categories to a names-only line — nothing is ever hidden.
     ``skills_dir_override`` makes home resolution EXPLICIT: a build thread that never bound the HERMES_HOME
     ContextVar would otherwise leak the default profile's skills into a bot's prompt.
+    ``name_allowlist`` (attention router, FI-003 2026-10-07) narrows the index to core AAA + the active
+    lane's nonflow skills; excluded entries stay reachable via skills_list/skill_view — hidden from the
+    prompt, never deleted. ``allowlist_note`` is appended verbatim to the rendered index (router trailer).
     """
     _home_token = None
     if skills_dir_override is not None:
@@ -1342,7 +1346,8 @@ def build_skills_system_prompt(
         if not skills_dir.exists() and not external_dirs and not project_dirs:
             return ""
         return _build_skills_system_prompt_inner(
-            skills_dir, external_dirs, available_tools, available_toolsets, compact_categories, project_dirs)
+            skills_dir, external_dirs, available_tools, available_toolsets, compact_categories, project_dirs,
+            name_allowlist=name_allowlist, allowlist_note=allowlist_note)
     finally:
         if _home_token is not None:
             reset_hermes_home_override(_home_token)
@@ -1470,7 +1475,9 @@ def _build_skills_system_prompt_inner(
     skills_dir: "Path", external_dirs: "list[Path]", available_tools: "set[str] | None",
     available_toolsets: "set[str] | None", compact_categories: "frozenset[str] | None",
     project_dirs: "list[Path] | None" = None,
+    name_allowlist: "set[str] | None" = None, allowlist_note: "str | None" = None,
 ) -> str:
+    from agent.attention_router import ALWAYS_VISIBLE_SKILLS
     # The resolved platform is part of the key: per-platform disabled-skill lists need distinct cache entries.
     _platform_hint = _current_session_platform_hint()
     disabled = get_disabled_skill_names(_platform_hint or None)
@@ -1481,6 +1488,7 @@ def _build_skills_system_prompt_inner(
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint, tuple(sorted(disabled)), tuple(sorted(compact_categories or ())),
         _oneshot_prompt_variant(),
+        tuple(sorted(name_allowlist or ())), (allowlist_note or ""),
     )
     snapshot = _load_skills_snapshot(skills_dir)
     app_gated = snapshot is not None and any(
@@ -1492,9 +1500,15 @@ def _build_skills_system_prompt_inner(
             _SKILLS_PROMPT_CACHE.move_to_end(cache_key)
             return cached
 
+    # Attention-router allowlist (None = legacy full index). One shared visibility
+    # rule covers every source (snapshot, scan, project, external) so an allowlisted
+    # context can never leak an off-lane entry through a secondary directory.
+    _allow_keep = (set(name_allowlist) | set(ALWAYS_VISIBLE_SKILLS)) if name_allowlist is not None else None
+
     def hides(frontmatter_name: str, skill_name: str, conditions: dict) -> bool:
         """Per-build visibility rule shared by every skill source (snapshot, scan, project, external)."""
         return (frontmatter_name in disabled or skill_name in disabled
+                or (_allow_keep is not None and frontmatter_name not in _allow_keep and skill_name not in _allow_keep)
                 or not _skill_should_show(conditions, available_tools, available_toolsets, _platform_hint or None))
 
     skills_by_category: dict[str, list[tuple[str, str]]] = {}
@@ -1544,6 +1558,8 @@ def _build_skills_system_prompt_inner(
             category_descriptions.setdefault(cat, cat_desc)
 
     result = _render_skills_index(skills_by_category, category_descriptions, compact_categories, available_tools)
+    if result and allowlist_note:
+        result = f"{result}\n\n{allowlist_note}"
     with _SKILLS_PROMPT_CACHE_LOCK:
         _SKILLS_PROMPT_CACHE[cache_key] = result
         _SKILLS_PROMPT_CACHE.move_to_end(cache_key)
