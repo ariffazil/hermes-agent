@@ -73,6 +73,11 @@ def _approve(subsystem: str, rest: List[str], memory_store) -> str:
     else:
         rec = wa.get_pending(subsystem, target)
         if not rec:
+            moved = wa.find_moved_pending(subsystem, target)
+            if moved:
+                return (f"Pending {subsystem} write '{target}' is no longer in the queue — a "
+                        f"concurrent sweep/drain moved it to {moved}. It was NOT applied; "
+                        f"move it back or re-stage the change to approve it.")
             return f"No pending {subsystem} write with id '{target}'."
         targets = [rec]
 
@@ -145,6 +150,10 @@ def _reject(subsystem: str, rest: List[str]) -> str:
         return f"Rejected {n} pending {subsystem} write(s)."
     if wa.discard_pending(subsystem, target):
         return f"Rejected pending {subsystem} write '{target}'."
+    moved = wa.find_moved_pending(subsystem, target)
+    if moved:
+        return (f"Pending {subsystem} write '{target}' is no longer in the queue — a "
+                f"concurrent sweep/drain moved it to {moved}. Nothing to reject.")
     return f"No pending {subsystem} write with id '{target}'."
 
 

@@ -115,6 +115,22 @@ def get_pending(subsystem: str, pending_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def find_moved_pending(subsystem: str, pending_id: str) -> Optional[str]:
+    """Absolute path of a record with this id that lives OUTSIDE the top-level queue
+    (i.e. a sweep/drain moved it into ``applied/``, ``_expired/`` or ``_archive-*/``), else None.
+
+    The pending queue is a directory shared with sweep/drain tooling; a record can be
+    relocated between ``list_pending`` and ``get_pending``. Distinguishing "moved" from
+    "never existed" keeps the approve/reject error honest."""
+    d = _pending_path(subsystem, "").parent
+    if not d.exists() or (d / f"{pending_id}.json").exists():
+        return None
+    for p in d.rglob(f"{pending_id}.json"):
+        if p.is_file():
+            return str(p)
+    return None
+
+
 def discard_pending(subsystem: str, pending_id: str) -> bool:
     """Delete a pending record. Returns True if it existed."""
     try:

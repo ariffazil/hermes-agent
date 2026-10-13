@@ -5857,6 +5857,35 @@ class TelegramAdapter(BasePlatformAdapter):
         """Topic-level free-response entries as ``<chat_id>:<thread_id>`` (General topic = ``1``)."""
         return self._extra_str_set("free_response_topics", "TELEGRAM_FREE_RESPONSE_TOPICS")
 
+    def _telegram_reply_expected(self, message: Message) -> Optional[bool]:
+        """``MessageEvent.reply_expected`` for an admitted Telegram message.
+
+        Mirrors ``SlackAdapter._slack_reply_expected`` (scar:SADO-SILENCE-ANNOUNCED,
+        2026-10-12). ``False`` — a bare silence marker may stand — only for a message the
+        bot was neither mentioned in nor quote-replied to, that a free-response chat or
+        topic dispatched anyway. Those are participant rooms (SADO): the bot is in the
+        conversation, not its addressee.
+
+        ``True`` when mentioned, quote-replied, or matched by a wake-word pattern. ``None``
+        otherwise, so the gateway keeps its visible fallback for genuine ambiguity
+        (#110952) rather than swallowing a turn that needed an answer.
+
+        Without this the Telegram adapter never populates ``reply_expected``, so
+        ``silence_allowed()`` is False on every human turn and an intended silence is
+        replaced by ``_UNEXPECTED_SILENCE_REPLY``. The room then receives a bot message
+        about its own silence — the exact noise this exists to remove.
+        """
+        if self._message_mentions_bot(message) or self._is_reply_to_bot(message):
+            return True
+        if self._message_matches_mention_patterns(message):
+            return True
+        if self._chat_id_str(message) in self._telegram_free_response_chats():
+            return False
+        if self._telegram_is_free_response_topic(message):
+            return False
+        return None
+
+
     def _telegram_is_free_response_topic(self, message: Message) -> bool:
         """True when the message's chat/topic pair is in ``free_response_topics``."""
         topics = self._telegram_free_response_topics()
@@ -6439,6 +6468,38 @@ class TelegramAdapter(BasePlatformAdapter):
         user_id = getattr(from_user, "id", None)
         return bot_id is not None and user_id is not None and bot_id == user_id
 
+    def _chat_targets_self(self, message) -> bool:
+        """True when the reply target is this bot's own user id.
+
+        Telegram refuses that send: "the bot can't send messages to the bot".
+        A mirrored DM uses this chat id with a human author, so the own-message
+        check alone does not see it.
+        """
+        bot_id = getattr(getattr(self, "_bot", None), "id", None)
+        chat = getattr(message, "chat", None)
+        chat_id = getattr(chat, "id", None)
+        try:
+            return bot_id is not None and chat_id is not None and int(chat_id) == int(bot_id)
+        except (TypeError, ValueError):
+            return False
+
+    def _drop_self_target(self, message) -> bool:
+        """Undeliverable update: our own echo, or a chat whose id is this bot."""
+        if message is None:
+            return False
+        return self._is_own_message(message) or self._chat_targets_self(message)
+
+    def _refuse_self_target(self, message) -> bool:
+        """Drop before auth and before a model turn. Logs ids only, never text."""
+        if not self._drop_self_target(message):
+            return False
+        logger.info(
+            "[Telegram] drop self-target chat=%s from=%s",
+            getattr(getattr(message, "chat", None), "id", None),
+            getattr(getattr(message, "from_user", None), "id", None),
+        )
+        return True
+
     def _sender_is_other_bot(self, message: Message) -> bool:
         """True when the sender is a bot other than this one (this bot's own echoes are already
         filtered by ``_is_own_message``)."""
@@ -6460,7 +6521,7 @@ class TelegramAdapter(BasePlatformAdapter):
         # stale handle in place and the exclusive-mention gate reads a message addressed to us as one
         # addressed to some other bot.
         self._observe_bot_identity_from_message(message)
-        if self._is_own_message(message):
+        if self._drop_self_target(message):
             return False
         if not self._is_group_chat(message):
             return True
@@ -6541,6 +6602,8 @@ class TelegramAdapter(BasePlatformAdapter):
         msg = self._effective_update_message(update)
         if not msg or not msg.text:
             return
+        if self._refuse_self_target(msg):
+            return
         # Auth check first: blocked users must not reach batching, the observed transcript, or the agent.
         if not self._is_user_authorized_from_message(msg):
             self._log_blocked_user(msg)
@@ -6554,6 +6617,8 @@ class TelegramAdapter(BasePlatformAdapter):
         """Handle incoming command messages."""
         msg = self._effective_update_message(update)
         if not msg or not msg.text:
+            return
+        if self._refuse_self_target(msg):
             return
         if not self._should_process_message(msg, is_command=True):
             return
@@ -6573,6 +6638,8 @@ class TelegramAdapter(BasePlatformAdapter):
         """Handle incoming location/venue pin messages."""
         msg = self._effective_update_message(update)
         if not msg:
+            return
+        if self._refuse_self_target(msg):
             return
         if not self._is_user_authorized_from_message(msg):
             self._log_blocked_user(msg)
@@ -6853,6 +6920,8 @@ class TelegramAdapter(BasePlatformAdapter):
         """Handle incoming media messages, downloading images to local cache."""
         msg = update.message
         if not msg:
+            return
+        if self._refuse_self_target(msg):
             return
         if not self._is_user_authorized_from_message(msg):
             self._log_blocked_user(msg, level=logging.INFO, what="media from unauthorized user")
@@ -7175,6 +7244,7 @@ class TelegramAdapter(BasePlatformAdapter):
             message_id=str(message.message_id), platform_update_id=update_id,
             reply_to_message_id=reply_to_id, reply_to_text=reply_to_text, auto_skill=topic_skill,
             channel_prompt=group_identity_prompt(self, message, channel_prompt),
+            reply_expected=self._telegram_reply_expected(message),
             timestamp=message.date)
 
     # -- Message reactions (processing lifecycle) --

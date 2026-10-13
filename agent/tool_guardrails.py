@@ -123,8 +123,12 @@ class ToolCallGuardrailConfig:
     non_interactive_hard_stop_enabled: bool = True
     exact_failure_warn_after: int = 2
     exact_failure_block_after: int = 5
-    same_tool_failure_warn_after: int = 3
-    same_tool_failure_halt_after: int = 8
+    same_tool_failure_warn_after: int = 2
+    # F13 2026-10-08 scar:HERMES-NOTIFICATION-DRIFT: 2-strike halt aligns with
+    # HERMES_2.0_NOTIFICATION_SPEC §2 — after 2 same-tool failures, stop retrying
+    # and switch methodology (provider/lane → federation telemetry → STOP SEARCH
+    # START MODEL). Tightened from default 4 to enforce attention preservation.
+    same_tool_failure_halt_after: int = 2
     no_progress_warn_after: int = 2
     no_progress_block_after: int = 5
     idempotent_tools: frozenset[str] = field(default_factory=lambda: IDEMPOTENT_TOOL_NAMES)
@@ -251,8 +255,13 @@ _DECISION_MESSAGES: dict[str, str] = {
         "Stop repeating it unchanged; use the result already provided or try a different query."
     ),
     "same_tool_failure_halt": (
-        "Stopped {tool_name}: it failed {count} times this turn. "
-        "Stop retrying the same failing tool path and choose a different approach."
+        "Stopped {tool_name}: it failed {count} times this turn. Escalation ladder, in order: "
+        "(1) switch provider or lane for the same need; "
+        "(2) if no lane serves it, switch methodology - primary source, official filings, or "
+        "existing federation telemetry (WEALTH/CHRON/memory) instead of more web searching; "
+        "(3) if the evidence in hand already identifies drivers and falsifiers, STOP searching "
+        "and START modeling - one failed witness lane does not make the domain unanalyzable. "
+        "Do not return to {tool_name} this turn."
     ),
     "repeated_exact_failure_warning": (
         "{tool_name} has failed {count} times with identical arguments. This looks like a loop; "
@@ -586,9 +595,16 @@ def _tool_failure_recovery_hint(tool_name: str, count: int) -> str:
             "working directory, or a different tool such as read_file/write_file/patch."
         )
     return common + (
-        "Try different arguments, a narrower query/path, an absolute path when relevant, "
-        "or a different tool that can make progress. If the blocker is external, report "
-        "the blocker after one diagnostic attempt instead of repeating the same failing path."
+        # F13 2026-10-08 scar:HERMES-NOTIFICATION-DRIFT - see HERMES_2.0_NOTIFICATION_SPEC §2
+        "Escalation ladder, in order: "
+        "(1) switch provider or lane for the same need (try brave_search → exa → firecrawl → "
+        "firecrawl_search → zai_search); "
+        "(2) if no lane serves it, switch methodology - primary source, official filings, or "
+        "existing federation telemetry (WEALTH/CHRON/memory/AAA skill) instead of more web searching; "
+        "(3) if drivers and falsifiers are already identified, STOP SEARCHING and START MODELING - "
+        "one failed witness lane does not make the domain unanalyzable. "
+        "A failed tool is evidence about the lane, not about the domain. "
+        "Do not return to this tool this turn."
     )
 
 

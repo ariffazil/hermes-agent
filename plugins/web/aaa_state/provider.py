@@ -174,11 +174,24 @@ class AAAStateWebProvider(BaseWebSearchProvider):
                 "request_id": f"hermes-aaa-{int(time.time())}",
             })
 
-            if "error" in result and not result.get("results"):
-                return search_fail(result["error"])
+            # A-FORGE MCP envelopes its payload as
+            #   {"status": "OK"|"ERROR", "data": {...}, "message": ...}
+            # while the legacy/local shape is flat {"error", "results"}.
+            # Accept BOTH. Scar:EMPTY-SUCCESS-SENSOR-LIE (2026-10-12) — the
+            # flat-only guard never matched the enveloped ERROR, so an invalid
+            # Brave key plus a dead SearXNG came back as success:true with zero
+            # hits. The model then narrated an infrastructure failure it had
+            # never observed. A backend error must reach the caller verbatim;
+            # never launder it into an empty success.
+            payload = result.get("data") if isinstance(result.get("data"), dict) else {}
+            status = str(result.get("status") or "").upper()
+            error = result.get("error") or payload.get("error")
+            if not error and status and status not in ("OK", "SUCCESS"):
+                error = result.get("message") or f"forge_search status={status}"
+            results = result.get("results") or payload.get("results") or []
 
-            # Extract results from forge_search response
-            results = result.get("results", [])
+            if error and not results:
+                return search_fail(str(error))
 
             # Normalize to Hermes contract: {title, url, description, position}
             web_results = []
@@ -192,8 +205,8 @@ class AAAStateWebProvider(BaseWebSearchProvider):
                     )
                 )
 
-            receipt_id = result.get("receipt_id", "")
-            provider = result.get("provider", "unknown")
+            receipt_id = result.get("receipt_id") or payload.get("receipt_id") or ""
+            provider = result.get("provider") or payload.get("provider") or "unknown"
             logger.info(
                 "AAA gateway search '%s': %d results (provider=%s, receipt=%s)",
                 query, len(web_results), provider, receipt_id,
