@@ -38,5 +38,22 @@ def pin_hermes_tree_on_pythonpath(worker_env: dict, repo_root: Path) -> dict:
     if _installed_purelib() == Path(root).resolve():
         return worker_env
     existing = [e for e in worker_env.get("PYTHONPATH", "").split(os.pathsep) if e]
-    worker_env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys([root, *existing]))
+    entries = [root]
+    # The worker is spawned as `-m cron.scheduler`, not via hermes_bootstrap, so
+    # activate_dependencies() never runs for it. Pin the committed venv's
+    # site-packages here (mirror of activate_dependencies) or third-party imports
+    # (dotenv, ruamel, requests) fail before the ownership ack (#112729 follow-up:
+    # the launch-architecture change moved deps to a separate venv that this worker
+    # never activated).
+    try:
+        from pm.environments import committed_venv, site_packages
+
+        env = committed_venv(repo_root)
+        if env is not None:
+            sp = site_packages(env)
+            if sp.is_dir():
+                entries.append(str(sp))
+    except Exception:
+        pass
+    worker_env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys([*entries, *existing]))
     return worker_env
