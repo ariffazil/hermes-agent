@@ -49,7 +49,16 @@ home_mounts+=(--bind "$DEV_SANDBOX_ROOT/home" "$DEV_SANDBOX_HOME")
 
 node_env=()
 if [ -n "${DEV_SANDBOX_NODE_DIR:-}" ]; then
-  node_env+=(--setenv npm_config_nodedir "$DEV_SANDBOX_NODE_DIR")
+  # node-gyp takes a nodedir as "the tree that has both include/node and
+  # common.gypi". DEV_SANDBOX_NODE_DIR is derived from `command -v node`, and a
+  # distro/runner binary prefix (/usr, /usr/local) has the headers but NOT
+  # common.gypi -- pointing node-gyp at it makes every native build fail with
+  # "gyp: <dir>/common.gypi not found" (node-pty's postinstall, which is what
+  # breaks the installer's npm install). Only pass it through when it really is
+  # a node tree; otherwise leave it unset so node-gyp fetches its own headers.
+  if [ -f "$DEV_SANDBOX_NODE_DIR/common.gypi" ] && [ -d "$DEV_SANDBOX_NODE_DIR/include/node" ]; then
+    node_env+=(--setenv npm_config_nodedir "$DEV_SANDBOX_NODE_DIR")
+  fi
 fi
 electron_env=()
 if [ -n "${DEV_SANDBOX_ELECTRON_LD_LIBRARY_PATH:-}" ]; then
@@ -196,6 +205,12 @@ if [ "$DEV_SANDBOX_INTERACTIVE" = true ]; then
   dev_mounts=(--dev /dev)
 fi
 
+# Every CA variable points at the sandbox's own throwaway CA (ca.pem), because
+# proxy.py TLS-terminates *every* CONNECT tunnel with a certificate it mints
+# from that CA. Node does not read SSL_CERT_FILE, so NODE_EXTRA_CA_CERTS is its
+# only route to trusting the proxy: with the real CA bundle here instead, npm
+# fails the handshake (proxy logs SSLEOFError) and every install that touches
+# the npm registry dies inside the sandbox.
 exec bwrap \
   --unshare-pid \
   --die-with-parent --proc /proc --tmpfs /tmp \
@@ -216,7 +231,7 @@ exec bwrap \
   --setenv CURL_CA_BUNDLE /work/certs/ca.pem \
   --setenv SSL_CERT_FILE /work/certs/ca.pem \
   --setenv GIT_SSL_CAINFO /work/certs/ca.pem \
-  --setenv NODE_EXTRA_CA_CERTS /work/certs/real-ca.pem \
+  --setenv NODE_EXTRA_CA_CERTS /work/certs/ca.pem \
   --setenv OPENSSL_CONF /work/certs/openssl.cnf \
   --setenv HTTP_PROXY http://127.0.0.1:8080 \
   --setenv HTTPS_PROXY http://127.0.0.1:8080 \

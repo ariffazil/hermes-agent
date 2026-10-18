@@ -2308,7 +2308,11 @@ install_node_deps() {
         # A failed npm install used to still print "✓ Node.js dependencies
         # installed", hiding the degradation from the user (#77003). Now it
         # fails the install outright instead of burying the warning (#85297).
-        if ! run_with_timeout "$NODE_DEPS_TIMEOUT" npm install --silent; then
+        # --loglevel=error, not --silent: a failed install must say WHY. Under
+        # --silent the entire diagnostic (registry/TLS/peer error) is discarded
+        # and the only visible line is "npm install failed", which is what made
+        # the Install & Update E2E failures unreadable.
+        if ! run_with_timeout "$NODE_DEPS_TIMEOUT" npm install --loglevel=error; then
             log_error "npm install failed or timed out; Node.js dependencies were not installed"
             restore_dirty_lockfiles "$INSTALL_DIR"
             return 1
