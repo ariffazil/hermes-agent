@@ -157,7 +157,7 @@ def _matrix_coordinate_for(skill_name: str) -> Optional[str]:
     if _MATRIX_CACHE["sig"] != sig:
         try:
             import json as _json
-            data = _json.loads(index_path.read_text())
+            data = _json.loads(index_path.read_text(encoding="utf-8-sig"))
             _MATRIX_CACHE["map"] = {
                 name: meta.get("coordinate")
                 for name, meta in (data.get("by_name") or {}).items()
