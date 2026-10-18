@@ -49,7 +49,16 @@ home_mounts+=(--bind "$DEV_SANDBOX_ROOT/home" "$DEV_SANDBOX_HOME")
 
 node_env=()
 if [ -n "${DEV_SANDBOX_NODE_DIR:-}" ]; then
-  node_env+=(--setenv npm_config_nodedir "$DEV_SANDBOX_NODE_DIR")
+  # node-gyp takes a nodedir as "the tree that has both include/node and
+  # common.gypi". DEV_SANDBOX_NODE_DIR is derived from `command -v node`, and a
+  # distro/runner binary prefix (/usr, /usr/local) has the headers but NOT
+  # common.gypi -- pointing node-gyp at it makes every native build fail with
+  # "gyp: <dir>/common.gypi not found" (node-pty's postinstall, which is what
+  # breaks the installer's npm install). Only pass it through when it really is
+  # a node tree; otherwise leave it unset so node-gyp fetches its own headers.
+  if [ -f "$DEV_SANDBOX_NODE_DIR/common.gypi" ] && [ -d "$DEV_SANDBOX_NODE_DIR/include/node" ]; then
+    node_env+=(--setenv npm_config_nodedir "$DEV_SANDBOX_NODE_DIR")
+  fi
 fi
 electron_env=()
 if [ -n "${DEV_SANDBOX_ELECTRON_LD_LIBRARY_PATH:-}" ]; then
