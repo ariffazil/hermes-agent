@@ -196,6 +196,12 @@ if [ "$DEV_SANDBOX_INTERACTIVE" = true ]; then
   dev_mounts=(--dev /dev)
 fi
 
+# Every CA variable points at the sandbox's own throwaway CA (ca.pem), because
+# proxy.py TLS-terminates *every* CONNECT tunnel with a certificate it mints
+# from that CA. Node does not read SSL_CERT_FILE, so NODE_EXTRA_CA_CERTS is its
+# only route to trusting the proxy: with the real CA bundle here instead, npm
+# fails the handshake (proxy logs SSLEOFError) and every install that touches
+# the npm registry dies inside the sandbox.
 exec bwrap \
   --unshare-pid \
   --die-with-parent --proc /proc --tmpfs /tmp \
@@ -216,7 +222,7 @@ exec bwrap \
   --setenv CURL_CA_BUNDLE /work/certs/ca.pem \
   --setenv SSL_CERT_FILE /work/certs/ca.pem \
   --setenv GIT_SSL_CAINFO /work/certs/ca.pem \
-  --setenv NODE_EXTRA_CA_CERTS /work/certs/real-ca.pem \
+  --setenv NODE_EXTRA_CA_CERTS /work/certs/ca.pem \
   --setenv OPENSSL_CONF /work/certs/openssl.cnf \
   --setenv HTTP_PROXY http://127.0.0.1:8080 \
   --setenv HTTPS_PROXY http://127.0.0.1:8080 \
