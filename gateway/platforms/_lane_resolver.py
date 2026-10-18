@@ -53,7 +53,7 @@ def _load_lanes_yaml() -> dict:
             mtime = path.stat().st_mtime
             if _cache["data"] is not None and mtime == _cache["mtime"]:
                 return _cache["data"]
-            with open(path) as f:
+            with open(path, encoding="utf-8-sig") as f:
                 data = yaml.safe_load(f) or {}
             _cache["data"] = data
             _cache["mtime"] = mtime
