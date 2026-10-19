@@ -780,12 +780,50 @@ def _resolve_single_delivery_target_unchecked(
 
     if deliver_value == "origin":
         if origin:
-            return {
-                "platform": origin["platform"],
-                "chat_id": str(origin["chat_id"]),
-                "thread_id": _origin_delivery_thread(origin),
-                "_resolved_from": "origin",  # provenance for _target_mirror_eligible
-            }
+            # P0-1 (2026-10-19): a session keyed by chat_id=bot id must not create a
+            # bot-target obligation. Deliver to the human user_id instead; if no human
+            # is recorded on the origin, fall through to the home channel. Never the bot.
+            origin_chat_id = str(origin["chat_id"])
+            try:
+                from gateway.delivery_guard import is_bot_target
+
+                bot_target = is_bot_target(str(origin["platform"]), origin_chat_id)
+            except Exception:
+                bot_target = False
+            if not bot_target:
+                return {
+                    "platform": origin["platform"],
+                    "chat_id": origin_chat_id,
+                    "thread_id": _origin_delivery_thread(origin),
+                    "_resolved_from": "origin",  # provenance for _target_mirror_eligible
+                }
+            human = str(origin.get("user_id") or origin.get("user") or "").strip()
+            if (
+                human
+                and human != origin_chat_id
+                and not is_bot_target(str(origin["platform"]), human)
+            ):
+                logger.info(
+                    "P0-1 redirect: origin chat_id %s is a bot id; delivering to human user_id %s",
+                    origin_chat_id,
+                    human,
+                )
+                return {
+                    "platform": origin["platform"],
+                    "chat_id": human,
+                    "thread_id": None,
+                    "_resolved_from": "origin_human_redirect",
+                }
+            logger.info(
+                "P0-1 redirect: origin chat_id %s is a bot id with no human user_id; "
+                "falling back to home channel",
+                origin_chat_id,
+            )
+            for platform_name in _iter_home_target_platforms():
+                chat_id = _get_home_target_chat_id(platform_name)
+                if chat_id:
+                    return _home_target(platform_name, chat_id, "origin_bot_redirect")
+            return None
         # No origin (API/script job): fall back to a home channel instead of silently dropping.
         for platform_name in _iter_home_target_platforms():
             chat_id = _get_home_target_chat_id(platform_name)

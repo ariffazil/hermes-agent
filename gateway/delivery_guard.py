@@ -60,6 +60,19 @@ def _active_profile_dir() -> Optional[Path]:
     return candidate if candidate.is_dir() else None
 
 
+def is_bot_target(platform: str, chat_id: str) -> bool:
+    """True when chat_id is a locked bot id (public helper for P0-1 redirect).
+
+    Callers use this to convert a bot-target obligation into a human user_id
+    delivery BEFORE target_allowed() has to fail closed on it.
+    """
+    lock = _load_json(IDENTITY_LOCK)
+    if not lock:
+        return False
+    base = str(chat_id or "").split(":", 1)[0].strip()
+    return base in _bot_ids(lock)
+
+
 def _bot_ids(lock: dict) -> set[str]:
     out: set[str] = set()
     for rec in (lock.get("bots") or {}).values():
