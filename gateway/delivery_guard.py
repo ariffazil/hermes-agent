@@ -132,17 +132,34 @@ def target_allowed(platform: str, chat_id: str) -> Tuple[bool, str]:
             f"active profile directory not found under {PROFILE_ROOT} — fail closed",
         )
 
-    directory_path = profile_dir / "channel_directory.json"
-    directory = _load_json(directory_path)
-    if directory is None:
-        return False, f"channel directory unreadable at {directory_path} — fail closed"
+    # P0-1 dual-directory defect fix (2026-10-19): the gateway's channel-directory
+    # writer saves to <HERMES_HOME>/channel_directory.json (refreshed every 5 min),
+    # while this guard used to read only the active profile's copy — a frozen
+    # snapshot that silently drifted. Read BOTH and union the ids so the allowlist
+    # tracks the live directory; fail closed only when neither is readable.
+    profile_path = profile_dir / "channel_directory.json"
+    live_path = Path("/root/.hermes/channel_directory.json")
+    profile_directory = _load_json(profile_path)
+    live_directory = _load_json(live_path)
+    if profile_directory is None and live_directory is None:
+        return False, (
+            f"channel directory unreadable at {profile_path} and {live_path} — fail closed"
+        )
 
-    known = _directory_ids(directory)
+    known: dict = {}
+    sources = []
+    for path, directory in (
+        (live_path, live_directory),
+        (profile_path, profile_directory),
+    ):
+        if directory is not None:
+            known.update(_directory_ids(directory))
+            sources.append(path.name)
     kind = known.get(base)
     if kind in ("dm", "group"):
-        return True, f"{base} is a known telegram {kind} in {directory_path.name}"
+        return True, f"{base} is a known telegram {kind} in {'+'.join(sources)}"
 
     return False, (
-        f"{base} is not a known human/group in {directory_path.name} — fail closed "
+        f"{base} is not a known human/group in {'+'.join(sources) or 'channel directory'} — fail closed "
         "(unknown destination is not permission to send)"
     )
