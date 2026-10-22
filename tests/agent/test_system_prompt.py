@@ -476,6 +476,7 @@ def test_coding_prompt_orders_shared_context_before_workspace(monkeypatch):
     monkeypatch.setattr(system_prompt, "HERMES_AGENT_HELP_GUIDANCE", "HELP")
     monkeypatch.setattr(system_prompt, "HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS", "HELP")
     monkeypatch.setattr(system_prompt, "STEER_CHANNEL_NOTE", "STEER")
+    monkeypatch.setattr(system_prompt, "NO_VISION_DISCLAIMER", "VISION")
     monkeypatch.setattr(system_prompt, "get_hermes_home", lambda: Path("/hermes"))
 
     # Production renders this as str(get_hermes_home()) + "/profiles/<name>/",
@@ -493,6 +494,7 @@ def test_coding_prompt_orders_shared_context_before_workspace(monkeypatch):
         "IDENTITY",
         "HELP",
         "STEER",
+        "VISION",
         "CODING_STABLE",
         "SYSTEM_MESSAGE",
         "CONTEXT_FILES",
@@ -520,7 +522,7 @@ def test_coding_prompt_orders_shared_context_before_workspace(monkeypatch):
         prompt = build_system_prompt(agent, system_message="SYSTEM_MESSAGE")
 
     assert prompt == expected
-    assert agent._cached_system_prompt_static == "\n\n".join(expected.split("\n\n")[:4])
+    assert agent._cached_system_prompt_static == "\n\n".join(expected.split("\n\n")[:5])
 
 
 class TestTelegramRichMessagesHint:
