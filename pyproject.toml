@@ -170,7 +170,7 @@ dependencies = [
   # libs required for the codecs we use, so it's safe to ship in the base
   # install rather than gating it behind an extra + a mid-session lazy install
   # (which deadlocked the CLI under prompt_toolkit — see #40490).
-  "Pillow==12.3.0; python_version >= '3.14'",
+  "Pillow>=13.0.0,<14; python_version >= '3.14'",
   # HEIF/HEIC/AVIF decode for the vision tools. iPhone photos and screenshots
   # are HEIC (frequently mislabeled .jpg by upload pipelines); Pillow has no
   # built-in HEIF codec, so without this the vision resolver rejects them as
@@ -637,6 +637,12 @@ override-dependencies = [
   # never builds a misaki G2P. The never-true marker removes it from the lock.
   # Remove this line when misaki drops it or a 3.14-capable release fits.
   "spacy-curated-transformers; sys_platform == 'never'",
+  # browser-harness 0.1.13 pins pillow==12.3.0, which holds Hermes on the
+  # CVE-2026-112900 / CVE-2026-112393 / CVE-2026-112403 vulnerable line.
+  # browser-harness uses only basic Image.open/fromarray-style APIs; smoke-
+  # tested on Pillow 13.0.0 (2026-10-23, import + rembg/matplotlib paths).
+  # Remove when browser-harness lifts the exact pin.
+  "pillow>=13.0.0,<14",
 ]
 exclude-newer = "14 days"
 # h2: temporary exclude-newer exception for the CVE-2026-71554 (GHSA-6hr6-w5qg-qmwg,
