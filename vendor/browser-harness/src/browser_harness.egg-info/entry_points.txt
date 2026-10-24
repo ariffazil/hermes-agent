@@ -1,0 +1,3 @@
+[console_scripts]
+browser-harness = browser_harness.run:main
+browser-harness-mcp = browser_harness.mcp_cli:main

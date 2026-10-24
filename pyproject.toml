@@ -608,6 +608,13 @@ neutts = "python_version < '3.14'"
 kittentts = "(platform_machine != 'ARM64' or sys_platform != 'win32') and (platform_machine != 'x86_64' or sys_platform != 'darwin')"
 piper = "(platform_machine != 'ARM64' or sys_platform != 'win32') and (platform_machine != 'x86_64' or sys_platform != 'darwin')"
 
+[tool.uv.sources]
+# SAH F13 (Arif 2026-10-25): vendor browser-harness 0.1.13 with relaxed pillow pin
+# (>=12.3,<14) so uv pip check agrees with the CVE fix (pillow 13). Upstream
+# 0.1.13 pins ==12.3.0; re-vendor when upstream lifts it. Absolute path so the
+# PM scratch-project copy of pyproject+uv.lock still resolves.
+browser-harness = { path = "/usr/local/lib/hermes-agent/vendor/browser-harness" }
+
 [tool.uv]
 # uv otherwise enables the dev group by default, including in payload builds.
 default-groups = []
