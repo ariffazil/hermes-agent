@@ -1531,15 +1531,57 @@ class GatewayInboundMixin:
         parts = basename.split("_", 2)
         return re.sub(r'[^\w.\- ]', '_', parts[2] if len(parts) >= 3 else basename), to_agent_visible_cache_path(path)
 
+    @staticmethod
+    def _video_digest_note(path: str) -> str:
+        """Frames + speech for a cached video, as text — so a text-only model can answer.
+
+        Why: Telegram hands over a bare .mp4 path, ``vision_analyze`` is image-only, and the
+        frame+ASR recipe needs a shell that the kernel gate may refuse. Measured failure
+        (2026-10-25 09:16): the lane went blind on a video the human had just sent and answered
+        "aku tak boleh baca video". The digest runs locally before the model is asked anything;
+        on any failure it returns "" and the caller keeps the old path-only note.
+        """
+        script = "/root/scripts/video-digest.py"
+        if not os.path.isfile(script):
+            return ""
+        python = "/usr/bin/python3" if os.path.isfile("/usr/bin/python3") else "python3"
+        try:
+            import subprocess
+            proc = subprocess.run(
+                [python, script, path, "--frames", "4"],
+                capture_output=True, text=True, timeout=90,
+            )
+            out = (proc.stdout or "").strip()
+            if proc.returncode == 0 and out.startswith("[VIDEO DIGEST"):
+                logger.info("[Telegram] video digest ready for %s", os.path.basename(path))
+                return out
+            logger.info(
+                "[Telegram] video digest unavailable for %s (rc=%s): %s",
+                os.path.basename(path), proc.returncode, (proc.stderr or "")[:200],
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("[Telegram] video digest crashed for %s", path, exc_info=True)
+        return ""
+
     @classmethod
     def _prepend_inbound_media_file_notes(cls, message_text: str, audio_file_paths: list[str], video_paths: list[str]) -> str:
-        """Prepend a path-pointing note per audio-file / video attachment (content is not inlined)."""
+        """Prepend a note per audio-file / video attachment. Videos get a local digest (frames +
+        speech) inlined as text; anything the digest cannot read keeps the path-only note."""
         for kind, noun, verb, tool, paths in (
             ("an audio file attachment", "audio", "transcribe or process", "a transcription or media tool", audio_file_paths),
             ("a video attachment", "video", "inspect or process", "a video analysis or media tool", video_paths),
         ):
             for _path in paths:
                 _display, _agent_path = cls._inbound_attachment_display_name(_path)
+                _digest = cls._video_digest_note(_path) if noun == "video" else ""
+                if _digest:
+                    message_text = (
+                        f"[The user sent {kind}: '{_display}'. Saved at: {_agent_path}. "
+                        f"Frames and speech were already extracted for you — read them from the "
+                        f"digest below instead of guessing or asking the user what it contains.]\n"
+                        f"{_digest}\n\n{message_text}"
+                    )
+                    continue
                 message_text = (
                     f"[The user sent {kind}: '{_display}'. "
                     f"It is saved at: {_agent_path}. "
