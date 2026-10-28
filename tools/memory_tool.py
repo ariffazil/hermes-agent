@@ -175,6 +175,20 @@ def _background_delete_gate(store, action, operations, target="memory", content=
 
     if not is_unattended_review():
         return None
+    try:
+        from tools import write_approval as _wa
+        _backlog = _wa.pending_count(_wa.MEMORY)
+        if _backlog >= 50:
+            return json.dumps({
+                "success": False,
+                "throttled": True,
+                "backlog": _backlog,
+                "message": (f"Memory revision queue is backlogged ({_backlog} pending). "
+                            "Do NOT stage another consolidation; 'add' still applies. "
+                            "Revisions resume after the queue is redeemed below 50."),
+            }, ensure_ascii=False)
+    except Exception:
+        logger.debug("memory backpressure check failed; proceeding to the stage gate", exc_info=True)
     payload = ({"action": "batch", "target": target, "operations": operations}
                if operations is not None else
                {"action": action, "target": target, "content": content, "old_text": old_text})

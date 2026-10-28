@@ -7892,13 +7892,31 @@ class TelegramAdapter(BasePlatformAdapter):
         no network call is made.
         """
         try:
-            from gateway.delivery_guard import target_allowed
-
-            allowed, reason = target_allowed("telegram", str(chat_id))
+            from gateway.delivery_guard import target_allowed, is_bot_target
         except Exception as exc:
             allowed, reason = False, f"delivery guard unavailable: {exc}"
+            is_bot_target = None
+        else:
+            allowed, reason = target_allowed("telegram", str(chat_id))
+
         if allowed:
             return None
+
+        # F13 2026-10-22 (888 kata putus): bot-to-bot target = SILENT NO-OP.
+        # Return success so callers do NOT retry (retries burned log noise for
+        # months — 2,700+ Forbidden lines). A2A traffic delivers via the bridge;
+        # the transcript still lands in state.db. Only bot ids take this path —
+        # human/unknown targets keep the original fail-closed SendResult.
+        try:
+            if is_bot_target and is_bot_target("telegram", str(chat_id)):
+                logger.info(
+                    "[%s] bot-to-bot target %s — silent no-op (F13 2026-10-22)",
+                    self.name, chat_id,
+                )
+                return SendResult(success=True, message_id=None)
+        except Exception:
+            pass
+
         logger.error(
             "[%s] DELIVERY_TARGET_BLOCKED target=%s reason=%s",
             self.name,

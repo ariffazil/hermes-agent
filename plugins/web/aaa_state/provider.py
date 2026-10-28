@@ -99,6 +99,43 @@ def _call_forge_mcp(tool: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return {"error": f"A-FORGE MCP call failed: {exc}"}
 
 
+_OK_STATUS = {"OK", "SUCCESS", "HEALTHY", "UP", "PASS", "FLOWING", "OK-V3-VECTOR"}
+
+
+def _unwrap_gateway(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the inner body of an A-FORGE MCP reply.
+
+    The live gateway wraps every tool reply as ``{"status": "OK", "data": {...}}``;
+    older builds returned the body flat. Reading only the flat shape made every
+    search/extract return an empty success (measured 2026-10-27: 0 results for a
+    query that the same gateway answered with 3). Unwrap when ``data`` is an
+    object; otherwise leave the reply untouched so a flat build still works.
+    """
+    if not isinstance(result, dict):
+        return {}
+    inner = result.get("data")
+    return inner if isinstance(inner, dict) else result
+
+
+def _gateway_error(result: Dict[str, Any]) -> str:
+    """Non-empty error string when the gateway refused or failed; '' on success.
+
+    A status that is not an allow word is a failure, not an empty result set.
+    Empty results are only honest after a reply that actually says OK.
+    """
+    if not isinstance(result, dict):
+        return "A-FORGE returned a non-object reply"
+    inner = result.get("data") if isinstance(result.get("data"), dict) else result
+    err = result.get("error") or inner.get("error")
+    if err:
+        return str(err)
+    for candidate in (result.get("status"), inner.get("status")):
+        status = str(candidate or "").strip().upper()
+        if status and status not in _OK_STATUS:
+            return f"A-FORGE status={status}"
+    return ""
+
+
 async def _run_extract_async(
     vendor: str,
     urls: List[str],
@@ -174,11 +211,15 @@ class AAAStateWebProvider(BaseWebSearchProvider):
                 "request_id": f"hermes-aaa-{int(time.time())}",
             })
 
-            if "error" in result and not result.get("results"):
-                return search_fail(result["error"])
+            gateway_error = _gateway_error(result)
+            if gateway_error:
+                return search_fail(gateway_error)
+
+            # Live gateway nests the body under "data"; older builds were flat.
+            payload = _unwrap_gateway(result)
 
             # Extract results from forge_search response
-            results = result.get("results", [])
+            results = payload.get("results", [])
 
             # Normalize to Hermes contract: {title, url, description, position}
             web_results = []
@@ -192,8 +233,8 @@ class AAAStateWebProvider(BaseWebSearchProvider):
                     )
                 )
 
-            receipt_id = result.get("receipt_id", "")
-            provider = result.get("provider", "unknown")
+            receipt_id = payload.get("receipt_id", "")
+            provider = payload.get("provider", "unknown")
             logger.info(
                 "AAA gateway search '%s': %d results (provider=%s, receipt=%s)",
                 query, len(web_results), provider, receipt_id,
@@ -219,17 +260,30 @@ class AAAStateWebProvider(BaseWebSearchProvider):
                         "request_id": f"hermes-aaa-ext-{int(time.time())}",
                     })
 
-                    if "error" in result and not result.get("content"):
-                        results.append(page_error(url, result["error"]))
+                    gateway_error = _gateway_error(result)
+                    if gateway_error:
+                        results.append(page_error(url, gateway_error))
                         continue
 
-                    # Extract content from forge_web_extract response
-                    content_text = result.get("content", "")
-                    title = result.get("title", "")
+                    # Live gateway nests the body under "data"; older builds were flat.
+                    payload = _unwrap_gateway(result)
+                    source_meta = payload.get("source")
+                    if not isinstance(source_meta, dict):
+                        source_meta = {}
+                    raw_content = payload.get("content", "")
+                    if isinstance(raw_content, dict):
+                        content_text = raw_content.get("text", "")
+                    else:
+                        content_text = raw_content
+                    title = source_meta.get("title") or payload.get("title", "")
+
+                    if not content_text:
+                        results.append(page_error(url, "A-FORGE returned empty content"))
+                        continue
 
                     results.append(
                         document(
-                            url=url,
+                            url=str(source_meta.get("final_url") or url),
                             title=str(title),
                             content=str(content_text),
                         )

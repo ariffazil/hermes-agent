@@ -767,6 +767,17 @@ def skill_view(
             # Internal: absolute source path for the repeat-view dedup fingerprint.
             "_source_path": str(skill_md),
             **readiness_extras}
+        try:
+            from agent.skill_utils import is_external_skill_path as _is_external_skill_path
+            _read_only = bool(skill_dir and _is_external_skill_path(skill_dir))
+        except Exception:
+            _read_only = False
+        result["read_only"] = _read_only
+        if _read_only:
+            result["read_only_reason"] = (
+                "This skill lives in skills.external_dirs (externally owned, read-only to "
+                "autonomous curation). skill_manage writes will be refused; record the lesson "
+                "in MEMORY.md instead, or ask the owner to change the skill.")
         if deps_note:
             result["deps_note"] = deps_note
         _mark_background_review_read(skill_md)
