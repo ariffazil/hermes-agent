@@ -381,12 +381,16 @@ override-dependencies = [
   # Remove this line when alibabacloud-tea-openapi lifts the cap.
   "cryptography>=50,<51",
 ]
-exclude-newer = "14 days"
-# h2: temporary exclude-newer exception for the CVE-2026-71554 (GHSA-6hr6-w5qg-qmwg,
-# request-smuggling) fix in 4.4.1, published 2026-08-03. Remove after 2026-08-17.
-# aiohttp, cryptography: same shape — the advisory fixes are newer than the
-# 14-day window, so the resolver cannot see them without an exception.
-exclude-newer-package = { vercel = false, nemo-relay = false, huggingface_hub = false, h2 = false, aiohttp = false, cryptography = false }
+# NOTE (2026-11-08): the relative window `exclude-newer = "14 days"` was removed.
+# A relative window makes uv.lock expire by design: 14 days after the lock is
+# written the eligible version set has drifted, `uv sync --locked` fails, and
+# install.sh silently falls back to an unverified PyPI resolve -- the
+# hash-verified guarantee users are promised becomes empty with no signal.
+# The installer already dropped this cutoff on its own side (d8d57fb2f
+# "fix(install): remove uv exclude-newer cutoff"); supply-chain protection now
+# rests on the pinned, upper-bounded dependencies plus the committed hashes in
+# uv.lock, refreshed by `uv lock` on dependency changes. The per-package
+# exceptions existed only to widen the same window and go with it.
 
 [tool.setuptools]
 # Top-level single-file modules (not packages). Without this, uv2nix's
