@@ -2309,9 +2309,18 @@ install_node_deps() {
         # installed", hiding the degradation from the user (#77003). Now it
         # fails the install outright instead of burying the warning (#85297).
         if ! run_with_timeout "$NODE_DEPS_TIMEOUT" npm install --silent; then
-            log_error "npm install failed or timed out; Node.js dependencies were not installed"
-            restore_dirty_lockfiles "$INSTALL_DIR"
-            return 1
+            # --silent swallows npm's own diagnosis, so a red install gives no
+            # cause (measured 2026-11-08: E2E legs failed with only two
+            # SSLEOFError lines and zero npm output). One loud retry surfaces
+            # the real error and absorbs transient registry/CDN failures
+            # without changing the success-path UX. npm install is resumable,
+            # so a partially-applied first attempt is safe to re-run.
+            log_warn "npm install failed -- retrying once with full error output"
+            if ! run_with_timeout "$NODE_DEPS_TIMEOUT" npm install --loglevel error; then
+                log_error "npm install failed or timed out; Node.js dependencies were not installed"
+                restore_dirty_lockfiles "$INSTALL_DIR"
+                return 1
+            fi
         fi
         log_success "Node.js dependencies installed"
 
@@ -2415,9 +2424,13 @@ install_node_deps() {
         # Report success only on actual success, same as node-deps above
         # (#77003) — and fail the install outright (#85297).
         if ! run_with_timeout "$NODE_DEPS_TIMEOUT" npm install --silent; then
-            log_error "TUI npm install failed or timed out; TUI dependencies were not installed"
-            restore_dirty_lockfiles "$INSTALL_DIR"
-            return 1
+            # Same loud-retry rationale as the node-deps install above.
+            log_warn "TUI npm install failed -- retrying once with full error output"
+            if ! run_with_timeout "$NODE_DEPS_TIMEOUT" npm install --loglevel error; then
+                log_error "TUI npm install failed or timed out; TUI dependencies were not installed"
+                restore_dirty_lockfiles "$INSTALL_DIR"
+                return 1
+            fi
         fi
         log_success "TUI dependencies installed"
     fi
