@@ -444,6 +444,20 @@ if [ ! -f "$SANDBOX_ROOT/root/certs/ca.pem" ]; then
     exit 1
   fi
 fi
+
+# Node clients split into two populations inside this sandbox, and one trust
+# file has to satisfy both:
+#   * proxy-honoring clients (npm) hit the MITM proxy, whose CONNECT
+#     interception terminates TLS with certs minted from the SANDBOX CA --
+#     they need the sandbox CA to trust it;
+#   * direct clients (playwright's downloader ignores proxy env) reach real
+#     hosts and see real certificates -- they need the real CA bundle.
+# Node reads exactly one extra bundle, so concatenate both. Without the
+# sandbox half, npm aborts every handshake and the proxy log floods with
+# SSLEOFError(8) -- the installer then reports "npm install failed (browser
+# tools may not work)" for a network that is actually fine.
+cat "$SANDBOX_ROOT/root/certs/real-ca.pem" "$SANDBOX_ROOT/root/certs/ca.pem" \
+  > "$SANDBOX_ROOT/root/certs/node-ca.pem"
 GIT_UPLOAD_PACK="$(command -v git-upload-pack)"
 sed "s|@GIT_UPLOAD_PACK@|$GIT_UPLOAD_PACK|" "$SANDBOX_ASSETS/ssh-shim.sh" \
   > "$SANDBOX_ROOT/root/usr/bin/ssh"
