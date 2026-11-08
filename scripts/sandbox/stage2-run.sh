@@ -26,15 +26,15 @@ set -euo pipefail
 # Announce our pid so stage 1 can point slirp4netns at these namespaces,
 # then hold until it reports the network is up.
 slirp_ready="$DEV_SANDBOX_ROOT/root/logs/slirp.ready"
-printf '%s\n' "$$" > "$DEV_SANDBOX_ROOT/root/logs/sandbox.pid"
+printf '%s\n' "$$" >"$DEV_SANDBOX_ROOT/root/logs/sandbox.pid"
 for _ in $(seq 1 200); do
-  [ -s "$slirp_ready" ] && break
-  sleep 0.05
+	[ -s "$slirp_ready" ] && break
+	sleep 0.05
 done
 if [ ! -s "$slirp_ready" ]; then
-  echo 'error: timed out waiting for sandbox network setup' >&2
-  cat "$DEV_SANDBOX_ROOT/root/logs/slirp.log" >&2 || true
-  exit 1
+	echo 'error: timed out waiting for sandbox network setup' >&2
+	cat "$DEV_SANDBOX_ROOT/root/logs/slirp.log" >&2 || true
+	exit 1
 fi
 
 # The sandbox HOME is /root for a root install and /home/<user> for a
@@ -43,34 +43,43 @@ fi
 home_mounts=()
 home_parent="$(dirname "$DEV_SANDBOX_HOME")"
 if [ "$home_parent" != / ]; then
-  home_mounts+=(--dir "$home_parent")
+	home_mounts+=(--dir "$home_parent")
 fi
 home_mounts+=(--bind "$DEV_SANDBOX_ROOT/home" "$DEV_SANDBOX_HOME")
 
 node_env=()
+node_mounts=()
 if [ -n "${DEV_SANDBOX_NODE_DIR:-}" ]; then
-  node_env+=(--setenv npm_config_nodedir "$DEV_SANDBOX_NODE_DIR")
+	node_env+=(--setenv npm_config_nodedir "$DEV_SANDBOX_NODE_DIR")
+	# The env var is only honest if the headers it names are reachable inside
+	# the sandbox. Without this bind, node-gyp resolves a dead path and falls
+	# back to /usr/local/common.gypi (absent on runners) -- measured
+	# 2026-11-08: node-pty's native build failed on CI while passing on dev
+	# boxes whose node lives under /usr (already bound).
+	if [ -d "$DEV_SANDBOX_NODE_DIR" ]; then
+		node_mounts+=(--ro-bind "$DEV_SANDBOX_NODE_DIR" "$DEV_SANDBOX_NODE_DIR")
+	fi
 fi
 electron_env=()
 if [ -n "${DEV_SANDBOX_ELECTRON_LD_LIBRARY_PATH:-}" ]; then
-  electron_env+=(
-    --setenv LD_LIBRARY_PATH "$DEV_SANDBOX_ELECTRON_LD_LIBRARY_PATH"
-    --setenv HERMES_DESKTOP_DISABLE_GPU 1
-  )
+	electron_env+=(
+		--setenv LD_LIBRARY_PATH "$DEV_SANDBOX_ELECTRON_LD_LIBRARY_PATH"
+		--setenv HERMES_DESKTOP_DISABLE_GPU 1
+	)
 fi
 gui_mounts=()
 if [ -n "${DEV_SANDBOX_WAYLAND_SOCKET:-}" ]; then
-  runtime_dir="${DEV_SANDBOX_XDG_RUNTIME_DIR:?missing DEV_SANDBOX_XDG_RUNTIME_DIR}"
-  runtime_parent="$(dirname "$runtime_dir")"
-  runtime_grandparent="$(dirname "$runtime_parent")"
-  gui_mounts+=(
-    --dir "$runtime_grandparent"
-    --dir "$runtime_parent"
-    --dir "$runtime_dir"
-    --bind "$DEV_SANDBOX_WAYLAND_SOCKET" "$DEV_SANDBOX_WAYLAND_SOCKET"
-    --setenv XDG_RUNTIME_DIR "$runtime_dir"
-    --setenv WAYLAND_DISPLAY "${DEV_SANDBOX_WAYLAND_DISPLAY:?missing DEV_SANDBOX_WAYLAND_DISPLAY}"
-  )
+	runtime_dir="${DEV_SANDBOX_XDG_RUNTIME_DIR:?missing DEV_SANDBOX_XDG_RUNTIME_DIR}"
+	runtime_parent="$(dirname "$runtime_dir")"
+	runtime_grandparent="$(dirname "$runtime_parent")"
+	gui_mounts+=(
+		--dir "$runtime_grandparent"
+		--dir "$runtime_parent"
+		--dir "$runtime_dir"
+		--bind "$DEV_SANDBOX_WAYLAND_SOCKET" "$DEV_SANDBOX_WAYLAND_SOCKET"
+		--setenv XDG_RUNTIME_DIR "$runtime_dir"
+		--setenv WAYLAND_DISPLAY "${DEV_SANDBOX_WAYLAND_DISPLAY:?missing DEV_SANDBOX_WAYLAND_DISPLAY}"
+	)
 fi
 
 # How the sandbox gets a usable runtime, and where its own shims go.
@@ -85,30 +94,30 @@ fi
 #
 # The same answer decides how /etc is handled further down.
 if [ -d /nix ] && [[ "$(readlink -f "$DEV_SANDBOX_BASH")" == /nix/* ]]; then
-  USE_HOST_RUNTIME=false
+	USE_HOST_RUNTIME=false
 else
-  USE_HOST_RUNTIME=true
+	USE_HOST_RUNTIME=true
 fi
 
 runtime_mounts=()
 shim_mounts=()
 if [ "$USE_HOST_RUNTIME" = false ]; then
-  runtime_mounts+=(--ro-bind /nix /nix)
-  shim_mounts+=(
-    --dir /usr
-    --dir /bin
-    --dir /lib64
-    --bind "$DEV_SANDBOX_ROOT/root/bin" /bin
-    --bind "$DEV_SANDBOX_ROOT/root/lib64" /lib64
-    --bind "$DEV_SANDBOX_ROOT/root/usr/bin" /usr/bin
-  )
+	runtime_mounts+=(--ro-bind /nix /nix)
+	shim_mounts+=(
+		--dir /usr
+		--dir /bin
+		--dir /lib64
+		--bind "$DEV_SANDBOX_ROOT/root/bin" /bin
+		--bind "$DEV_SANDBOX_ROOT/root/lib64" /lib64
+		--bind "$DEV_SANDBOX_ROOT/root/usr/bin" /usr/bin
+	)
 else
-  for path in /usr /bin /sbin /lib /lib64; do
-    [ -e "$path" ] && runtime_mounts+=(--ro-bind "$path" "$path")
-  done
-  # The git-upload-pack shim standing in for github.com is the only file that
-  # must beat the host's copy; sh/ls/env are already there for real.
-  shim_mounts+=(--bind "$DEV_SANDBOX_ROOT/root/usr/bin/ssh" /usr/bin/ssh)
+	for path in /usr /bin /sbin /lib /lib64; do
+		[ -e "$path" ] && runtime_mounts+=(--ro-bind "$path" "$path")
+	done
+	# The git-upload-pack shim standing in for github.com is the only file that
+	# must beat the host's copy; sh/ls/env are already there for real.
+	shim_mounts+=(--bind "$DEV_SANDBOX_ROOT/root/usr/bin/ssh" /usr/bin/ssh)
 fi
 
 # /etc: start from a copy of the host's and overwrite only the files we fake.
@@ -146,21 +155,21 @@ fi
 # DISTRO="unknown" and the apt path is skipped, which is the truth.
 etc_mounts=()
 if [ "$USE_HOST_RUNTIME" = true ] && [ -d /etc ]; then
-  sandbox_etc="$DEV_SANDBOX_ROOT/etc-merged"
-  rm -rf -- "$sandbox_etc"
-  mkdir -p "$sandbox_etc"
-  # -a keeps symlinks as symlinks; unreadable entries (shadow, sudoers) are
-  # skipped rather than failing the run.
-  cp -a /etc/. "$sandbox_etc/" 2>/dev/null || true
-  for etc_file in passwd group resolv.conf nsswitch.conf hosts; do
-    [ -f "$DEV_SANDBOX_ROOT/etc/$etc_file" ] || continue
-    rm -f "$sandbox_etc/$etc_file"
-    cp "$DEV_SANDBOX_ROOT/etc/$etc_file" "$sandbox_etc/$etc_file"
-  done
-  rm -f "$sandbox_etc/os-release" "$sandbox_etc/lsb-release"
-  etc_mounts+=(--ro-bind "$sandbox_etc" /etc)
+	sandbox_etc="$DEV_SANDBOX_ROOT/etc-merged"
+	rm -rf -- "$sandbox_etc"
+	mkdir -p "$sandbox_etc"
+	# -a keeps symlinks as symlinks; unreadable entries (shadow, sudoers) are
+	# skipped rather than failing the run.
+	cp -a /etc/. "$sandbox_etc/" 2>/dev/null || true
+	for etc_file in passwd group resolv.conf nsswitch.conf hosts; do
+		[ -f "$DEV_SANDBOX_ROOT/etc/$etc_file" ] || continue
+		rm -f "$sandbox_etc/$etc_file"
+		cp "$DEV_SANDBOX_ROOT/etc/$etc_file" "$sandbox_etc/$etc_file"
+	done
+	rm -f "$sandbox_etc/os-release" "$sandbox_etc/lsb-release"
+	etc_mounts+=(--ro-bind "$sandbox_etc" /etc)
 else
-  etc_mounts+=(--bind "$DEV_SANDBOX_ROOT/etc" /etc)
+	etc_mounts+=(--bind "$DEV_SANDBOX_ROOT/etc" /etc)
 fi
 
 # /dev without a tty, so a script guarding on `[ -e /dev/tty ]` takes its
@@ -180,53 +189,54 @@ fi
 # --dev cannot be used with the node removed afterwards (bwrap refuses to mount
 # a directory over a device node), so /dev is assembled explicitly.
 dev_mounts=(
-  --tmpfs /dev
-  --dev-bind /dev/null /dev/null
-  --dev-bind /dev/zero /dev/zero
-  --dev-bind /dev/full /dev/full
-  --dev-bind /dev/random /dev/random
-  --dev-bind /dev/urandom /dev/urandom
-  --symlink /proc/self/fd /dev/fd
-  --symlink /proc/self/fd/0 /dev/stdin
-  --symlink /proc/self/fd/1 /dev/stdout
-  --symlink /proc/self/fd/2 /dev/stderr
+	--tmpfs /dev
+	--dev-bind /dev/null /dev/null
+	--dev-bind /dev/zero /dev/zero
+	--dev-bind /dev/full /dev/full
+	--dev-bind /dev/random /dev/random
+	--dev-bind /dev/urandom /dev/urandom
+	--symlink /proc/self/fd /dev/fd
+	--symlink /proc/self/fd/0 /dev/stdin
+	--symlink /proc/self/fd/1 /dev/stdout
+	--symlink /proc/self/fd/2 /dev/stderr
 )
 if [ "$DEV_SANDBOX_INTERACTIVE" = true ]; then
-  # An interactive shell is deliberately given a terminal; keep bwrap's /dev.
-  dev_mounts=(--dev /dev)
+	# An interactive shell is deliberately given a terminal; keep bwrap's /dev.
+	dev_mounts=(--dev /dev)
 fi
 
 exec bwrap \
-  --unshare-pid \
-  --die-with-parent --proc /proc --tmpfs /tmp \
-  "${dev_mounts[@]}" \
-  "${gui_mounts[@]}" \
-  "${runtime_mounts[@]}" \
-  --bind "$DEV_SANDBOX_ROOT/root" /work \
-  "${shim_mounts[@]}" \
-  --bind "$DEV_SANDBOX_ROOT/root/usr/local" /usr/local \
-  "${home_mounts[@]}" \
-  "${etc_mounts[@]}" \
-  --chdir /work/repo \
-  --clearenv \
-  --setenv PATH "$DEV_SANDBOX_HOME/.local/bin:/usr/local/bin:/usr/bin:$PATH" \
-  --setenv HOME "$DEV_SANDBOX_HOME" \
-  --setenv USER "$DEV_SANDBOX_USER" \
-  --setenv LOGNAME "$DEV_SANDBOX_USER" \
-  --setenv CURL_CA_BUNDLE /work/certs/ca.pem \
-  --setenv SSL_CERT_FILE /work/certs/ca.pem \
-  --setenv GIT_SSL_CAINFO /work/certs/ca.pem \
-  --setenv NODE_EXTRA_CA_CERTS /work/certs/node-ca.pem \
-  --setenv OPENSSL_CONF /work/certs/openssl.cnf \
-  --setenv HTTP_PROXY http://127.0.0.1:8080 \
-  --setenv HTTPS_PROXY http://127.0.0.1:8080 \
-  --setenv ALL_PROXY http://127.0.0.1:8080 \
-  --setenv NO_PROXY '' \
-  --setenv DEV_SANDBOX_INTERACTIVE "$DEV_SANDBOX_INTERACTIVE" \
-  --setenv ELECTRON_DISABLE_SANDBOX 1 \
-  "${node_env[@]}" \
-  "${electron_env[@]}" \
-  -- "$DEV_SANDBOX_BASH" -ceu '
+	--unshare-pid \
+	--die-with-parent --proc /proc --tmpfs /tmp \
+	"${dev_mounts[@]}" \
+	"${gui_mounts[@]}" \
+	"${runtime_mounts[@]}" \
+	"${node_mounts[@]}" \
+	--bind "$DEV_SANDBOX_ROOT/root" /work \
+	"${shim_mounts[@]}" \
+	--bind "$DEV_SANDBOX_ROOT/root/usr/local" /usr/local \
+	"${home_mounts[@]}" \
+	"${etc_mounts[@]}" \
+	--chdir /work/repo \
+	--clearenv \
+	--setenv PATH "$DEV_SANDBOX_HOME/.local/bin:/usr/local/bin:/usr/bin:$PATH" \
+	--setenv HOME "$DEV_SANDBOX_HOME" \
+	--setenv USER "$DEV_SANDBOX_USER" \
+	--setenv LOGNAME "$DEV_SANDBOX_USER" \
+	--setenv CURL_CA_BUNDLE /work/certs/ca.pem \
+	--setenv SSL_CERT_FILE /work/certs/ca.pem \
+	--setenv GIT_SSL_CAINFO /work/certs/ca.pem \
+	--setenv NODE_EXTRA_CA_CERTS /work/certs/node-ca.pem \
+	--setenv OPENSSL_CONF /work/certs/openssl.cnf \
+	--setenv HTTP_PROXY http://127.0.0.1:8080 \
+	--setenv HTTPS_PROXY http://127.0.0.1:8080 \
+	--setenv ALL_PROXY http://127.0.0.1:8080 \
+	--setenv NO_PROXY '' \
+	--setenv DEV_SANDBOX_INTERACTIVE "$DEV_SANDBOX_INTERACTIVE" \
+	--setenv ELECTRON_DISABLE_SANDBOX 1 \
+	"${node_env[@]}" \
+	"${electron_env[@]}" \
+	-- "$DEV_SANDBOX_BASH" -ceu '
     python3 /work/proxy.py /work/http /work/certs /work/certs/real-ca.pem >/work/logs/proxy.log 2>&1 &
     proxy_pid=$!
     cleanup() {
