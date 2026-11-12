@@ -1181,8 +1181,88 @@ def drain_truncation_warnings() -> list:
 _SKILLS_PROMPT_CACHE_MAX = 32
 _SKILLS_PROMPT_CACHE: OrderedDict[tuple, str] = OrderedDict()
 _SKILLS_PROMPT_CACHE_LOCK = threading.Lock()
-# v2 added org provenance fields (org_id/org_author); older snapshots are rebuilt.
-_SKILLS_SNAPSHOT_VERSION = 3
+# v4 added canonical realpath dedup + matrix coordinate / Tier-1 active resolution.
+_SKILLS_SNAPSHOT_VERSION = 4
+_MATRIX_INDEX_CACHE: dict[str, object] = {"sig": None, "map": {}, "cfg_sig": None, "active": frozenset(), "compact": frozenset()}
+_ZEN_SPINE_SKILLS = frozenset({
+    "000-salam", "111-tengok", "222-reka", "333-fikir", "444-arah",
+    "555-betul", "666-rasa", "777-forge", "888-adil", "999-ingat",
+})
+
+
+def _load_matrix_and_tier_config(skills_dir: Path) -> tuple[dict[str, str], frozenset[str], frozenset[str], bool]:
+    """Return (coordinate_map, active_tier1_skills, configured_compact_categories, is_enabled) when .matrix-index.json exists."""
+    index_path = skills_dir / ".matrix-index.json"
+    if not index_path.is_file():
+        home_index = get_hermes_home() / "skills" / ".matrix-index.json"
+        try:
+            ext_dirs = {Path(d).resolve() for d in get_all_skills_dirs()[1:]}
+        except Exception:
+            ext_dirs = set()
+        if home_index.is_file() and skills_dir.resolve() in ext_dirs:
+            index_path = home_index
+        else:
+            return {}, frozenset(), frozenset(), False
+    try:
+        sig = index_path.stat().st_mtime_ns
+        if _MATRIX_INDEX_CACHE["sig"] != sig:
+            data = json.loads(index_path.read_text(encoding="utf-8-sig"))
+            _MATRIX_INDEX_CACHE["map"] = {
+                name: str(meta.get("coordinate"))
+                for name, meta in (data.get("by_name") or {}).items()
+                if isinstance(meta, dict) and meta.get("coordinate")
+            }
+            _MATRIX_INDEX_CACHE["sig"] = sig
+    except Exception:
+        return {}, frozenset(), frozenset(), False
+
+    cfg_path = get_hermes_home() / "config.yaml"
+    try:
+        cfg_sig = cfg_path.stat().st_mtime_ns if cfg_path.is_file() else None
+        if _MATRIX_INDEX_CACHE["cfg_sig"] != cfg_sig:
+            import yaml as _yaml
+            raw_cfg = (_yaml.safe_load(cfg_path.read_text(encoding="utf-8-sig")) or {}) if cfg_path.is_file() else {}
+            skills_cfg = (raw_cfg.get("skills") or {}) if isinstance(raw_cfg, dict) else {}
+            active_list = skills_cfg.get("active_skills") or []
+            compact_list = skills_cfg.get("compact_categories")
+            if compact_list is None:
+                compact_list = ["domains"]
+            _MATRIX_INDEX_CACHE["active"] = frozenset(str(x).strip() for x in active_list if str(x).strip()) | _ZEN_SPINE_SKILLS
+            _MATRIX_INDEX_CACHE["compact"] = frozenset(str(x).strip() for x in compact_list if str(x).strip())
+            _MATRIX_INDEX_CACHE["cfg_sig"] = cfg_sig
+    except Exception:
+        pass
+    return (
+        _MATRIX_INDEX_CACHE["map"],  # type: ignore[return-value]
+        _MATRIX_INDEX_CACHE["active"],  # type: ignore[return-value]
+        _MATRIX_INDEX_CACHE["compact"],  # type: ignore[return-value]
+        True,
+    )
+
+
+def _resolve_skill_category(skills_dir: Path, skill_name: str, canonical_skill_id: str, raw_category: str) -> str:
+    coord_map, active_skills, _, enabled = _load_matrix_and_tier_config(skills_dir)
+    if not enabled:
+        return raw_category
+    cat = raw_category
+    is_active = (skill_name in active_skills) or (canonical_skill_id in active_skills)
+    is_zen = (skill_name in _ZEN_SPINE_SKILLS) or (canonical_skill_id in _ZEN_SPINE_SKILLS)
+    if cat == skill_name:
+        coord = coord_map.get(skill_name) or coord_map.get(canonical_skill_id)
+        if coord:
+            cat = coord
+        elif is_zen:
+            cat = "core/zen-spine"
+        elif is_active:
+            cat = "active"
+        else:
+            cat = "domains/general/unclassified"
+    if is_zen:
+        return "core/zen-spine"
+    if is_active and cat.startswith("domains"):
+        parts = cat.split("/")
+        return f"active/{parts[1]}" if len(parts) > 1 else "active"
+    return cat
 
 
 def _skills_prompt_snapshot_path() -> Path:
@@ -1257,11 +1337,15 @@ def _build_snapshot_entry(skill_file: Path, skills_dir: Path, frontmatter: dict,
     if len(parts) >= 3 and parts[0] == ORG_MIRROR_DIR_NAME:
         org_id, parts = parts[1], parts[2:]
     skill_name = skill_file.parent.name  # == parts[-2] whenever a parent component exists
-    category = "general" if len(parts) < 2 else "/".join(parts[:-2]) if len(parts) > 2 else parts[0]
+    raw_category = "general" if len(parts) < 2 else "/".join(parts[:-2]) if len(parts) > 2 else parts[0]
+    real_path = os.path.realpath(skill_file)
+    canonical_skill_id = Path(real_path).parent.name
+    category = raw_category if org_id else _resolve_skill_category(skills_dir, skill_name, canonical_skill_id, raw_category)
     platforms = frontmatter.get("platforms") or []
     platforms = [platforms] if isinstance(platforms, str) else platforms
     entry = {
         "skill_name": skill_name, "category": category, "frontmatter_name": str(frontmatter.get("name", skill_name)),
+        "canonical_skill_id": canonical_skill_id, "realpath": real_path,
         "description": description, "platforms": [str(p).strip() for p in platforms if str(p).strip()],
         "conditions": extract_skill_conditions(frontmatter),
         "requires_apps": _requires_apps_list(frontmatter),
@@ -1380,19 +1464,79 @@ def _read_category_descriptions(root: Path, log_fmt: str) -> dict[str, str]:
     return found
 
 
+def _deduplicate_entries_by_realpath(entries: list[dict]) -> tuple[list[dict], set[str], set[str]]:
+    """Group skill entries by (realpath, org_id) so each canonical SKILL.md is exposed once in the prompt."""
+    groups: OrderedDict[tuple[str, str | None], list[dict]] = OrderedDict()
+    claimed_names: set[str] = set()
+    claimed_realpaths: set[str] = set()
+    for entry in entries:
+        rp = str(entry.get("realpath") or "")
+        org_id = entry.get("org_id")
+        key = (rp or f"__no_rp__:{id(entry)}", org_id)
+        groups.setdefault(key, []).append(entry)
+        for k in ("frontmatter_name", "skill_name", "canonical_skill_id"):
+            val = entry.get(k)
+            if val:
+                claimed_names.add(str(val))
+        if rp:
+            claimed_realpaths.add(rp)
+
+    deduped: list[dict] = []
+    for (rp, _org_id), grp in groups.items():
+        if len(grp) == 1:
+            e = dict(grp[0])
+            deduped.append(e)
+            continue
+        canon_id = str(grp[0].get("canonical_skill_id") or Path(rp).parent.name)
+        best = sorted(
+            grp,
+            key=lambda x: (
+                0 if (x.get("skill_name") == canon_id or _entry_name(x) == canon_id) else 1,
+                0 if x.get("category") != x.get("skill_name") else 1,
+                str(x.get("skill_name") or ""),
+            ),
+        )[0]
+        chosen = dict(best)
+        # Expose under the canonical skill id when aliases point to the same target.
+        chosen["frontmatter_name"] = canon_id
+        chosen["skill_name"] = canon_id
+        all_names = {
+            str(n)
+            for item in grp
+            for n in (item.get("skill_name"), item.get("frontmatter_name"))
+            if n and str(n) != canon_id
+        }
+        if all_names:
+            chosen["aliases"] = sorted(all_names)
+        deduped.append(chosen)
+    return deduped, claimed_names, claimed_realpaths
+
+
 def _collect_extra_skills(
     root: Path, skill_files, hides, claimed: set[str], skills_by_category: dict[str, list[tuple[str, str]]],
-    *, desc_prefix: str, log_fmt: str,
+    *, desc_prefix: str, log_fmt: str, claimed_realpaths: "set[str] | None" = None,
 ) -> None:
-    """Add visible skills from a project/external dir; names already in *claimed* are skipped."""
+    """Add visible skills from a project/external dir; names or realpaths already claimed are skipped."""
     for skill_file in skill_files:
         try:
             is_compatible, frontmatter, desc = _parse_skill_file(skill_file)
             entry = _build_snapshot_entry(skill_file, root, frontmatter, desc) if is_compatible else None
             fm_name = entry["frontmatter_name"] if entry else ""
-            if not entry or fm_name in claimed or hides(fm_name, entry["skill_name"], extract_skill_conditions(frontmatter)):
+            rp = entry.get("realpath", "") if entry else ""
+            canon_id = entry.get("canonical_skill_id", "") if entry else ""
+            if (
+                not entry
+                or fm_name in claimed
+                or canon_id in claimed
+                or (claimed_realpaths is not None and rp and rp in claimed_realpaths)
+                or hides(fm_name, entry["skill_name"], extract_skill_conditions(frontmatter), canon_id)
+            ):
                 continue
             claimed.add(fm_name)
+            if canon_id:
+                claimed.add(canon_id)
+            if claimed_realpaths is not None and rp:
+                claimed_realpaths.add(rp)
             skills_by_category.setdefault(entry["category"], []).append((fm_name, f"{desc_prefix}{entry['description']}".strip()))
         except Exception as e:
             logger.debug(log_fmt, skill_file, e)
@@ -1489,11 +1633,17 @@ def _build_skills_system_prompt_inner(
     _platform_hint = _current_session_platform_hint()
     disabled = get_disabled_skill_names(_platform_hint or None)
     project_dirs = project_dirs or []
+    _, _, cfg_compact, tier_enabled = _load_matrix_and_tier_config(skills_dir)
+    effective_compact: "frozenset[str] | None" = (
+        frozenset((compact_categories or frozenset()) | cfg_compact)
+        if tier_enabled and (compact_categories or cfg_compact)
+        else compact_categories
+    )
     cache_key = (
         str(skills_dir), tuple(str(d) for d in external_dirs), tuple(str(d) for d in project_dirs),
         tuple(sorted(str(t) for t in (available_tools or set()))),
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
-        _platform_hint, tuple(sorted(disabled)), tuple(sorted(compact_categories or ())),
+        _platform_hint, tuple(sorted(disabled)), tuple(sorted(effective_compact or ())),
         _oneshot_prompt_variant(),
     )
     snapshot = _load_skills_snapshot(skills_dir)
@@ -1506,9 +1656,9 @@ def _build_skills_system_prompt_inner(
             _SKILLS_PROMPT_CACHE.move_to_end(cache_key)
             return cached
 
-    def hides(frontmatter_name: str, skill_name: str, conditions: dict) -> bool:
+    def hides(frontmatter_name: str, skill_name: str, conditions: dict, canonical_id: str = "") -> bool:
         """Per-build visibility rule shared by every skill source (snapshot, scan, project, external)."""
-        return (frontmatter_name in disabled or skill_name in disabled
+        return (frontmatter_name in disabled or skill_name in disabled or (bool(canonical_id) and canonical_id in disabled)
                 or not _skill_should_show(conditions, available_tools, available_toolsets, _platform_hint or None))
 
     skills_by_category: dict[str, list[tuple[str, str]]] = {}
@@ -1525,10 +1675,16 @@ def _build_skills_system_prompt_inner(
         for skill_file in iter_skill_index_files(skills_dir, "SKILL.md"):
             is_compatible, frontmatter, desc = _parse_skill_file(skill_file)
             candidates.append((_build_snapshot_entry(skill_file, skills_dir, frontmatter, desc), is_compatible))
-    visible_entries: list[dict] = [
+    raw_visible: list[dict] = [
         entry for entry, is_compatible in candidates
-        if is_compatible and not hides(_entry_name(entry), entry.get("skill_name") or "", entry.get("conditions") or {})
+        if is_compatible and not hides(
+            _entry_name(entry),
+            entry.get("skill_name") or "",
+            entry.get("conditions") or {},
+            entry.get("canonical_skill_id") or "",
+        )
     ]
+    visible_entries, claimed_from_local, seen_realpaths = _deduplicate_entries_by_realpath(raw_visible)
 
     # Project-local skills (highest precedence) shadow same-named profile-local skills; tagged [project].
     project_names: set[str] = set()
@@ -1536,28 +1692,33 @@ def _build_skills_system_prompt_inner(
         from agent.skill_utils import iter_project_skill_files
         for proj_dir in (d for d in project_dirs if d.exists()):
             _collect_extra_skills(proj_dir, iter_project_skill_files(proj_dir), hides, project_names, skills_by_category,
-                                  desc_prefix="[project] ", log_fmt="Error reading project skill %s: %s")
+                                  desc_prefix="[project] ", log_fmt="Error reading project skill %s: %s",
+                                  claimed_realpaths=seen_realpaths)
     # Drop shadowed entries BEFORE org labeling so collision flags don't fire on intentional overrides.
     _label_visible_entries([e for e in visible_entries if _entry_name(e) not in project_names], skills_by_category)
     if snapshot is None:  # persist for fast cold-start reuse (best-effort)
         category_descriptions.update(_read_category_descriptions(skills_dir, "Could not read skill description %s: %s"))
         try:
+            deduped_all, _, _ = _deduplicate_entries_by_realpath([entry for entry, _ in candidates])
             atomic_json_write(_skills_prompt_snapshot_path(), {
                 "version": _SKILLS_SNAPSHOT_VERSION, "manifest": _build_skills_manifest(skills_dir),
-                "skills": [entry for entry, _ in candidates], "category_descriptions": category_descriptions,
+                "skills": [entry for entry, _ in candidates],
+                "canonical_skills": deduped_all,
+                "category_descriptions": category_descriptions,
             })
         except Exception as e:
             logger.debug("Could not write skills prompt snapshot: %s", e)
 
-    # External skill directories: scanned directly (read-only, small); names already indexed are skipped.
-    seen_skill_names: set[str] = {name for cat in skills_by_category.values() for name, _ in cat}
+    # External skill directories: scanned directly (read-only, small); names or realpaths already indexed are skipped.
+    seen_skill_names: set[str] = {name for cat in skills_by_category.values() for name, _ in cat} | claimed_from_local
     for ext_dir in (d for d in external_dirs if d.exists()):
         _collect_extra_skills(ext_dir, iter_skill_index_files(ext_dir, "SKILL.md"), hides, seen_skill_names,
-                              skills_by_category, desc_prefix="", log_fmt="Error reading external skill %s: %s")
+                              skills_by_category, desc_prefix="", log_fmt="Error reading external skill %s: %s",
+                              claimed_realpaths=seen_realpaths)
         for cat, cat_desc in _read_category_descriptions(ext_dir, "Could not read external skill description %s: %s").items():
             category_descriptions.setdefault(cat, cat_desc)
 
-    result = _render_skills_index(skills_by_category, category_descriptions, compact_categories, available_tools)
+    result = _render_skills_index(skills_by_category, category_descriptions, effective_compact, available_tools)
     with _SKILLS_PROMPT_CACHE_LOCK:
         _SKILLS_PROMPT_CACHE[cache_key] = result
         _SKILLS_PROMPT_CACHE.move_to_end(cache_key)

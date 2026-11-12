@@ -7902,18 +7902,23 @@ class TelegramAdapter(BasePlatformAdapter):
         if allowed:
             return None
 
-        # F13 2026-10-22 (888 kata putus): bot-to-bot target = SILENT NO-OP.
-        # Return success so callers do NOT retry (retries burned log noise for
-        # months — 2,700+ Forbidden lines). A2A traffic delivers via the bridge;
-        # the transcript still lands in state.db. Only bot ids take this path —
-        # human/unknown targets keep the original fail-closed SendResult.
+        # 2026-11-10 SEAL A2H-TERMINATOR (F13 Arif):
+        # Bot-to-bot target = TERMINAL HALT (HALT_NO_DELIVERY).
+        # Returning success=True tricked callers into believing delivery succeeded,
+        # keeping runaway agent tool-calling loops alive (session dc6378d9 burned 28 calls / 100k ctx).
+        # We now return an explicit, permanent terminal failure that stops redelivery
+        # and notifies the caller that delivery is permanently forbidden.
         try:
             if is_bot_target and is_bot_target("telegram", str(chat_id)):
-                logger.info(
-                    "[%s] bot-to-bot target %s — silent no-op (F13 2026-10-22)",
+                logger.warning(
+                    "[%s] bot-to-bot target %s — HALT_NO_DELIVERY (permanent delivery halt)",
                     self.name, chat_id,
                 )
-                return SendResult(success=True, message_id=None)
+                return SendResult(
+                    success=False,
+                    error="delivery_target_blocked: HALT_NO_DELIVERY bot target cannot receive messages",
+                    error_kind="terminal_no_delivery",
+                )
         except Exception:
             pass
 

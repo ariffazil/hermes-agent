@@ -29,6 +29,40 @@ def _scan_memory_content(content: str) -> Optional[str]:
     return _first_threat_message(content, scope="strict")
 
 
+def _check_tombstoned_entry(entry: str) -> Optional[Dict[str, Any]]:
+    """Gap D (F13 2026-11-12): Check whether a MemoryStore entry is tombstoned
+    as REJECTED_BY_HUMAN. Fail-closed if policy failure is forced or tombstone
+    store is unreadable."""
+    if not entry:
+        return None
+    if "REJECTED_BY_HUMAN" in entry:
+        return {
+            "id": "INLINE_REJECTED_BY_HUMAN",
+            "status": "REJECTED_BY_HUMAN",
+            "reason": "Entry carries REJECTED_BY_HUMAN marker.",
+        }
+    if os.environ.get("RASA_FORCE_POLICY_FAILURE", "").strip().lower() in {"1", "true", "yes"}:
+        return {
+            "id": "FAIL_CLOSED_POLICY_FORCED",
+            "status": "REJECTED_BY_HUMAN",
+            "fail_closed": True,
+            "reason": "RASA_FORCE_POLICY_FAILURE is active — MemoryStore fails closed.",
+        }
+    try:
+        import sys as _sys
+        if "/root/.hermes/policy" not in _sys.path:
+            _sys.path.insert(0, "/root/.hermes/policy")
+        from rasa_boundary import is_tombstoned as _is_tombstoned
+        return _is_tombstoned(text=entry)
+    except Exception as exc:
+        return {
+            "id": "FAIL_CLOSED_POLICY_IMPORT_ERROR",
+            "status": "REJECTED_BY_HUMAN",
+            "fail_closed": True,
+            "reason": f"rasa_boundary tombstone check failed: {exc}",
+        }
+
+
 def _error(message: str, **extra) -> Dict[str, Any]:
     return {"success": False, "error": message, **extra}
 
@@ -151,8 +185,9 @@ class MemoryStore:
             from hermes_constants import mkdir_under_hermes_home
 
             mkdir_under_hermes_home(path.parent)
-            # Deduplicate (order-preserving, first occurrence wins).
-            entries = list(dict.fromkeys(self._read_file(path)))
+            # Deduplicate (order-preserving, first occurrence wins) and filter out REJECTED_BY_HUMAN tombstones.
+            raw_entries = list(dict.fromkeys(self._read_file(path)))
+            entries = [e for e in raw_entries if _check_tombstoned_entry(e) is None]
             self._set_entries(target, entries)
             # External writers (MCP bridges, hand edits) can exceed the cap; the limit only fires on
             # add/replace, so the oversized block would silently ride in the prompt while every later
@@ -212,7 +247,8 @@ class MemoryStore:
         return memory_tool.get_memory_dir() / ("USER.md" if target == "user" else "MEMORY.md")
 
     def _entries_for(self, target: str) -> List[str]:
-        return self.user_entries if target == "user" else self.memory_entries
+        raw = self.user_entries if target == "user" else self.memory_entries
+        return [e for e in raw if _check_tombstoned_entry(e) is None]
 
     def _set_entries(self, target: str, entries: List[str]):
         setattr(self, "user_entries" if target == "user" else "memory_entries", entries)
@@ -280,6 +316,12 @@ class MemoryStore:
             return _error("Content cannot be empty.")
         if scan_error := _scan_memory_content(content):
             return _error(scan_error)
+        if tomb := _check_tombstoned_entry(content):
+            return _error(
+                f"Refusing to write tombstoned entry (REJECTED_BY_HUMAN: {tomb.get('id', 'tombstoned')}). "
+                "A human-rejected interpretation cannot be added to MemoryStore without new first-party evidence.",
+                status="REJECTED_BY_HUMAN",
+            )
 
         def _add(entries, limit):
             if content in entries:
@@ -307,6 +349,12 @@ class MemoryStore:
             return _error("new_content cannot be empty. Use 'remove' to delete entries.")
         if scan_error := _scan_memory_content(new_content):
             return _error(scan_error)
+        if tomb := _check_tombstoned_entry(new_content):
+            return _error(
+                f"Refusing to write tombstoned entry (REJECTED_BY_HUMAN: {tomb.get('id', 'tombstoned')}). "
+                "A human-rejected interpretation cannot be written to MemoryStore without new first-party evidence.",
+                status="REJECTED_BY_HUMAN",
+            )
         return self._edit(target, old_text.strip(), new_content, matched_entry)
 
     def remove(self, target: str, old_text: str, matched_entry: Optional[str] = None) -> Dict[str, Any]:
@@ -417,6 +465,12 @@ class MemoryStore:
             scan_error = op.get("action") in {"add", "replace"} and op.get("content") and _scan_memory_content(op["content"])
             if scan_error:
                 return _error(f"Operation {i + 1}: {scan_error}")
+            if op.get("action") in {"add", "replace"} and op.get("content"):
+                if tomb := _check_tombstoned_entry(op["content"]):
+                    return _error(
+                        f"Operation {i + 1}: Refusing to write tombstoned entry (REJECTED_BY_HUMAN: {tomb.get('id', 'tombstoned')}).",
+                        status="REJECTED_BY_HUMAN",
+                    )
 
         def _apply(entries, limit):
             working = list(entries)  # only committed if the whole batch validates
@@ -482,6 +536,7 @@ class MemoryStore:
 
     def _render_block(self, target: str, entries: List[str]) -> str:
         """System prompt block: header + usage indicator + entries ("" when empty)."""
+        entries = [e for e in entries if _check_tombstoned_entry(e) is None]
         if not entries:
             return ""
         content, sep = ENTRY_DELIMITER.join(entries), "═" * 46

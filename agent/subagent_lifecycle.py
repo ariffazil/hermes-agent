@@ -407,8 +407,18 @@ class SubagentLifecycleService:
             raise SubagentLifecycleError("metadata exceeds 8192 bytes.")
         if not request.allowed_toolsets:
             return
-        from toolsets import TOOLSETS
-        unknown = set(request.allowed_toolsets) - set(TOOLSETS)
+        from toolsets import TOOLSETS, validate_toolset
+        try:
+            from hermes_cli.config import load_config_readonly
+            from hermes_cli.tools_config import enabled_mcp_server_names
+            from hermes_cli.plugins import get_plugin_toolset_keys_nowait
+            extra_valid = enabled_mcp_server_names(load_config_readonly()) | get_plugin_toolset_keys_nowait()
+        except Exception:
+            extra_valid = set()
+        unknown = {
+            t for t in request.allowed_toolsets
+            if t not in TOOLSETS and not validate_toolset(t) and t not in extra_valid
+        }
         if unknown:
             raise SubagentLifecycleError(f"Unknown toolsets: {', '.join(sorted(unknown))}.")
         enabled = getattr(parent, "enabled_toolsets", None)

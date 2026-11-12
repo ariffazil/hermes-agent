@@ -625,19 +625,33 @@ class GatewayAuthorizationMixin:
         the message is still counted, it just no longer buys a generation. Groups are not
         touched — bot-to-bot traffic does reach a group, and the A2A lanes depend on it.
         """
-        if not getattr(source, "is_bot", False):
-            return False
         platform = getattr(getattr(source, "platform", None), "value", None)
         if str(platform or "").lower() != "telegram":
             return False
         if str(getattr(source, "chat_type", "") or "").lower() != "dm":
             return False
-        logger.info(
-            "Dropping bot-authored Telegram DM before generation: chat=%s sender=%s (%s) — "
-            "the transport cannot deliver a bot's reply to a bot, so a turn here is pure cost",
-            source.chat_id, source.user_id, source.user_name or "unnamed",
-        )
-        return True
+
+        # 2026-11-10 SEAL A2H-TERMINATOR (F13 Arif):
+        # A Telegram DM is undeliverable if the sender is a bot OR if the destination
+        # chat itself is a locked bot target (e.g. 8410138119). Generating turns for
+        # a bot destination burns massive tokens (up to 100k/call) on replies Telegram
+        # will refuse to deliver.
+        sender_is_bot = bool(getattr(source, "is_bot", False))
+        target_is_bot = False
+        try:
+            from gateway.delivery_guard import is_bot_target
+            target_is_bot = bool(is_bot_target("telegram", str(source.chat_id)))
+        except Exception:
+            pass
+
+        if sender_is_bot or target_is_bot:
+            logger.info(
+                "Dropping undeliverable Telegram DM before generation: chat=%s sender=%s (%s) "
+                "target_is_bot=%s sender_is_bot=%s — transport cannot deliver bot reply [HALT_NO_DELIVERY]",
+                source.chat_id, source.user_id, source.user_name or "unnamed", target_is_bot, sender_is_bot,
+            )
+            return True
+        return False
 
     def _is_user_authorized(self, source: SessionSource, *, allow_adapter_delegation: bool = True) -> bool:
         """Whether a user may use the bot.
