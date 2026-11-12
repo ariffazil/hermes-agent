@@ -197,6 +197,7 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
         return [dict(s) for s in cached[2]]
     skills = []
     seen_names: set = set()
+    seen_realpaths: set = set()
     for scan_dir in dirs_to_scan:  # project dirs go through the quarantine chokepoint
         _iter = iter_project_skill_files if scan_dir in project_dirs else lambda d: iter_skill_index_files(d, "SKILL.md")
         for skill_md in _iter(scan_dir):
@@ -207,15 +208,26 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                 if not skill_matches_platform(frontmatter) or not skill_matches_environment(frontmatter) or not skill_matches_apps(frontmatter):
                     continue
                 name = frontmatter.get("name", skill_md.parent.name)[:MAX_NAME_LENGTH]
-                if name in seen_names or name in disabled:
+                canonical_md = skill_md.resolve()
+                canonical_path = str(canonical_md)
+                canonical_dir_name = canonical_md.parent.name
+                if (
+                    name in seen_names
+                    or canonical_path in seen_realpaths
+                    or name in disabled
+                    or skill_md.parent.name in disabled
+                    or canonical_dir_name in disabled
+                ):
                     continue
                 description = frontmatter.get("description", "")
                 if not description:  # first non-heading body line (a null value stays null)
                     description = next((ln for ln in map(str.strip, body.strip().split("\n"))
                                         if ln and not ln.startswith("#")), description)
                 seen_names.add(name)
+                seen_realpaths.add(canonical_path)
                 skills.append({"name": name, "description": _truncate_description(description),
-                               "category": _get_category_from_path(skill_md)})
+                               "category": _get_category_from_path(skill_md),
+                               "canonical_skill_id": canonical_dir_name})
             except (UnicodeDecodeError, PermissionError) as e:
                 logger.debug("Failed to read skill file %s: %s", skill_md, e)
             except Exception as e:
@@ -604,8 +616,15 @@ def skill_view(
         if not skill_matches_platform(frontmatter):
             return _fail(f"Skill '{name}' is not supported on this platform.", readiness_status=SkillReadinessStatus.UNSUPPORTED.value)
         resolved_name = frontmatter.get("name", skill_md.parent.name)
-        if _is_skill_disabled(resolved_name):
-            return _fail(f"Skill '{resolved_name}' is disabled. Enable it with `hermes skills` or inspect the files directly on disk.")
+        canonical_md = skill_md.resolve()
+        canonical_dir_name = canonical_md.parent.name
+        disabled_names = _get_disabled_skill_names()
+        for candidate_name in (resolved_name, skill_md.parent.name, canonical_dir_name, local_category_name, name):
+            if candidate_name and candidate_name in disabled_names:
+                return _fail(
+                    f"Skill '{resolved_name}' is disabled (TOMBSTONED_FROM_ACTIVE_DISCOVERY). "
+                    "Enable it with `hermes skills` or inspect the files directly on disk."
+                )
         if file_path and skill_dir:
             return _serve_skill_file(
                 skill_dir, file_path, name, list_available=True, mark_read=True,
@@ -660,15 +679,18 @@ def skill_view(
 
         result = {
             "success": True, "name": skill_name, "description": frontmatter.get("description", ""),
+            "canonical_skill_id": canonical_dir_name, "canonical_path": str(canonical_md),
             "tags": tags, "related_skills": related_skills, "content": header + rendered_content,
             "path": rel_path, "skill_dir": str(skill_dir) if skill_dir else None,
             "org_provenance": org_provenance,
             "linked_files": linked_files if linked_files else None,
             "usage_hint": "To view linked files, call skill_view(name, file_path) where file_path is e.g. 'references/api.md' or 'assets/config.yaml'" if linked_files else None,
             **readiness,
-            # Internal: absolute source path for the repeat-view dedup fingerprint.
-            "_source_path": str(skill_md),
+            # Internal: canonical realpath for repeat-view dedup fingerprint and usage aggregation.
+            "_source_path": str(canonical_md),
             **readiness_extras}
+        if name and name != canonical_dir_name:
+            result["requested_alias"] = name
         if deps_note:
             result["deps_note"] = deps_note
         _mark_background_review_read(skill_md)
