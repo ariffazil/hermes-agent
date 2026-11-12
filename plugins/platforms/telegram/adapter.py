@@ -3681,6 +3681,24 @@ class TelegramAdapter(BasePlatformAdapter):
         # Skip whitespace-only text to prevent Telegram 400 empty-text errors.
         if not content or not content.strip():
             return SendResult(success=True, message_id=None)
+        # 2026-11-10 SEAL A2H-TERMINATOR (F13 Arif):
+        # Bot-to-bot target = TERMINAL HALT (HALT_NO_DELIVERY). Returning success=True
+        # tricked callers into believing delivery succeeded, keeping runaway agent
+        # tool-calling loops alive (session dc6378d9 burned 28 calls / 100k ctx).
+        # Upstream SendResult has no error_kind field; terminal = success=False, retryable defaults False.
+        try:
+            from gateway.delivery_guard import is_bot_target
+            if is_bot_target("telegram", str(chat_id)):
+                logger.warning(
+                    "[%s] bot-to-bot target %s — HALT_NO_DELIVERY (permanent delivery halt)",
+                    self.name, chat_id,
+                )
+                return SendResult(
+                    success=False,
+                    error="delivery_target_blocked: HALT_NO_DELIVERY bot target cannot receive messages",
+                )
+        except Exception:
+            pass
         # One chat at a time (held only around the API calls, never across the reconnect wait above), so
         # two concurrent split replies to one chat cannot interleave their chunks (#114396).
         async with self._chat_send_lock(chat_id):
